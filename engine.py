@@ -81,6 +81,7 @@ async def engine(
             "t": now_ms(),
         }
         yield {"type": "log", "message": f"--- {MODE_TITLES[mode]} ---", "t": now_ms()}
+
         if mode == "sync":
             started_at = 0
             for item in items:
@@ -118,6 +119,7 @@ async def engine(
                     }
                 )
                 started_at += delay_ms
+
         else:
             finish_ms: dict[str, int] = {}
 
@@ -278,6 +280,7 @@ async def engine(
                     ),
                     "t": now_ms(),
                 }
+
         elapsed_ms = now_ms()
         completed = len(finished_tasks) - sum(
             1 for t in finished_tasks if t["status"] == "cancelled"

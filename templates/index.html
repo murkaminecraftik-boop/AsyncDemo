@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Async Media Lab — Flask + asyncio demo</title>
+  <meta name="description" content="Full-stack demo: an async media loader built with Flask and Python asyncio. Compare sequential, gather, streaming and timeout execution modes while fetching GIFs and heavy videos.">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap header-inner">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">⚡</span>
+        <div>
+          <span class="brand-name">Async Media Lab</span>
+          <span class="brand-sub">Flask · asyncio · NDJSON streaming · SQLite</span>
+        </div>
+      </div>
+      <div class="header-badges">
+        <span class="badge badge-gif">6 GIFs</span>
+        <span class="badge badge-video">5 heavy videos</span>
+        <span class="badge badge-ok" id="health-badge">API ready</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="hero">
+      <h1>Watch <span class="accent">async</span> beat <span class="muted-accent">blocking</span> — request GIFs &amp; heavy videos and see them delivered live.</h1>
+      <p class="hero-sub">
+        Pick media, pick an execution mode, and the Flask backend runs the fetches with real Python asyncio
+        while streaming every event to this page over one HTTP response. It is the direct web port of the
+        classic CLI demo — each mode maps one-to-one to an asyncio primitive:
+      </p>
+      <div class="hero-modes">
+        <span class="map-chip"><b>Sequential</b><code>time.sleep()</code></span>
+        <span class="map-chip"><b>Gather</b><code>asyncio.gather()</code></span>
+        <span class="map-chip"><b>Stream</b><code>asyncio.as_completed()</code></span>
+        <span class="map-chip"><b>Timeout</b><code>asyncio.wait(timeout=…)</code></span>
+      </div>
+    </section>
+
+    <div class="layout">
+      <!-- ============ LEFT COLUMN ============ -->
+      <div class="col-main">
+
+        <section class="panel" aria-labelledby="catalog-title">
+          <div class="panel-head">
+            <h2 id="catalog-title"><span class="step-num">1</span> Media catalog</h2>
+            <div class="catalog-toolbar">
+              <button type="button" class="btn btn-ghost btn-sm" id="select-gifs">GIFs</button>
+              <button type="button" class="btn btn-ghost btn-sm" id="select-videos">Videos</button>
+              <button type="button" class="btn btn-ghost btn-sm" id="select-all">All</button>
+              <button type="button" class="btn btn-ghost btn-sm" id="select-none">Clear</button>
+            </div>
+          </div>
+          <p class="panel-note">
+            Each card shows the real file size and the simulated server-side processing time.
+            Videos are the “heavy” requests — in sequential mode they block everyone behind them.
+          </p>
+          <div class="catalog" id="catalog">
+            {% for item in items %}
+            <label class="media-card kind-{{ item.kind }}" data-key="{{ item.key }}" data-kind="{{ item.kind }}" data-delay="{{ item.delay_ms }}">
+              <input type="checkbox" class="media-check" value="{{ item.key }}" aria-label="Select {{ item.name }}">
+              <div class="media-thumb">
+                {% if item.kind == 'gif' %}
+                  <img src="{{ item.url }}" loading="lazy" alt="{{ item.name }} (animated GIF)">
+                {% else %}
+                  <video src="{{ item.url }}" preload="metadata" muted aria-label="{{ item.name }} (video)"></video>
+                  <span class="kind-chip">video</span>
+                {% endif %}
+                <span class="check-chip" aria-hidden="true"></span>
+              </div>
+              <div class="media-info">
+                <span class="media-name">{{ item.name }}</span>
+                <span class="media-meta">
+                  <span class="chip chip-{{ item.kind }}">{{ item.kind }}</span>
+                  <span>{{ '%.1f'|format(item.size_mb) }} MB</span>
+                  <span class="dot">·</span>
+                  <span>wait {{ '%.1f'|format(item.delay_ms / 1000) }}s</span>
+                </span>
+              </div>
+            </label>
+            {% endfor %}
+          </div>
+          <div class="catalog-summary" id="catalog-summary">
+            <span><b id="sel-count">0</b> selected</span>
+            <span>sequential estimate <b id="sel-estimate">0.0s</b></span>
+          </div>
+        </section>
+
+        <section class="panel" aria-labelledby="gallery-title">
+          <div class="panel-head">
+            <h2 id="gallery-title"><span class="step-num">3</span> Delivered media</h2>
+            <span class="panel-hint" id="gallery-hint">results appear as the server finishes them</span>
+          </div>
+          <div class="gallery" id="gallery" aria-live="polite">
+            <div class="gallery-empty" id="gallery-empty">
+              <span aria-hidden="true">📼</span>
+              <p>Nothing delivered yet — run a demo and results land here.</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel" aria-labelledby="metrics-title">
+          <div class="panel-head">
+            <h2 id="metrics-title"><span class="step-num">4</span> Metrics &amp; comparison</h2>
+          </div>
+          <div class="metrics-cards" id="metrics-cards">
+            <p class="metrics-empty">Run a demo to collect metrics.</p>
+          </div>
+          <div class="table-scroll">
+            <table class="data-table" id="comparison-table">
+              <caption class="sr-only">Comparison of demo runs in this session</caption>
+              <thead>
+                <tr><th>mode</th><th>completed</th><th>runtime</th><th>sequential est.</th><th>saved</th><th>throughput</th></tr>
+              </thead>
+              <tbody id="comparison-body">
+                <tr class="empty-row"><td colspan="6">No runs in this session yet.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel" aria-labelledby="history-title">
+          <div class="panel-head">
+            <h2 id="history-title"><span class="step-num">5</span> Run history <span class="db-chip">SQLite</span></h2>
+            <button type="button" class="btn btn-ghost btn-sm" id="history-refresh">Refresh</button>
+          </div>
+          <div class="table-scroll">
+            <table class="data-table" id="history-table">
+              <caption class="sr-only">Recent runs persisted in the database</caption>
+              <thead>
+                <tr><th>#</th><th>time</th><th>mode</th><th>tasks</th><th>runtime</th><th>saved</th><th>throughput</th></tr>
+              </thead>
+              <tbody id="history-body">
+                <tr class="empty-row"><td colspan="7">No runs stored yet.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <!-- ============ RIGHT COLUMN ============ -->
+      <aside class="col-side">
+        <section class="panel control-panel" aria-labelledby="mode-title">
+          <div class="panel-head">
+            <h2 id="mode-title"><span class="step-num">2</span> Execution mode</h2>
+          </div>
+
+          <div class="mode-list" role="radiogroup" aria-label="Execution mode">
+            <label class="mode-card">
+              <input type="radio" name="mode" value="sync">
+              <span class="mode-body">
+                <span class="mode-name">Sequential <code>sync</code></span>
+                <span class="mode-desc">One request at a time, blocking. Total ≈ sum of all waits.</span>
+              </span>
+            </label>
+            <label class="mode-card">
+              <input type="radio" name="mode" value="gather" checked>
+              <span class="mode-body">
+                <span class="mode-name">Parallel <code>asyncio.gather</code></span>
+                <span class="mode-desc">All at once; everything is rendered when the last finishes. Total ≈ max wait.</span>
+              </span>
+            </label>
+            <label class="mode-card">
+              <input type="radio" name="mode" value="stream">
+              <span class="mode-body">
+                <span class="mode-name">Streaming <code>as_completed</code></span>
+                <span class="mode-desc">Results stream in the moment each task finishes.</span>
+              </span>
+            </label>
+            <label class="mode-card">
+              <input type="radio" name="mode" value="timeout">
+              <span class="mode-body">
+                <span class="mode-name">Timeout <code>asyncio.wait</code></span>
+                <span class="mode-desc">Start all; anything slower than the limit gets cancelled.</span>
+              </span>
+            </label>
+          </div>
+
+          <div class="timeout-row" id="timeout-row" hidden>
+            <label for="timeout-range">Timeout limit: <b id="timeout-value">2.5s</b></label>
+            <input type="range" id="timeout-range" min="500" max="8000" step="250" value="2500">
+            <div class="range-scale"><span>0.5s</span><span>8.0s</span></div>
+          </div>
+
+          <div class="actions">
+            <button type="button" class="btn btn-primary" id="run-btn">Run demo</button>
+            <button type="button" class="btn btn-danger" id="stop-btn" disabled>Stop</button>
+          </div>
+
+          <div class="progress-wrap">
+            <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progress">
+              <div class="progress-bar" id="progress-bar"></div>
+            </div>
+            <span class="progress-label" id="progress-label">idle</span>
+          </div>
+        </section>
+
+        <section class="panel console-panel" aria-labelledby="console-title">
+          <div class="panel-head">
+            <h2 id="console-title">Live console</h2>
+            <button type="button" class="btn btn-ghost btn-sm" id="console-clear">Clear</button>
+          </div>
+          <div class="console" id="console" aria-live="polite" aria-label="Demo event log">
+            <div class="console-line console-hint">$ pick media + mode, then run the demo…</div>
+          </div>
+        </section>
+      </aside>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap footer-inner">
+      <span>Async Media Lab — full-stack Flask demo of Python asyncio.</span>
+      <span class="footer-tech">Python 3 · Flask · asyncio · SQLite · NDJSON streaming</span>
+    </div>
+  </footer>
+
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

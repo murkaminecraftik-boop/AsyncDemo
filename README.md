@@ -21,8 +21,7 @@ flask_app/
 ├── app.py              # Flask routes: / , /api/media , /api/run (NDJSON stream), /api/history
 ├── engine.py           # asyncio engine: async generator per mode, wrapped in a sync generator for WSGI
 ├── db.py               # SQLite layer: media catalog + run history (schema, seed, queries)
-├── requirements.txt    # flask
-├── run.sh              # venv bootstrap + start
+├── requirements.txt    # flask (the only third-party dependency)
 ├── templates/
 │   └── index.html      # single-page UI (Jinja2)
 └── static/
@@ -58,18 +57,14 @@ SQLite (stdlib `sqlite3`) with three tables:
 
 ```bash
 cd flask_app
-./run.sh            # creates venv on first run, starts Flask on 0.0.0.0:3000
+pip install -r requirements.txt
+python app.py       # starts Flask on http://0.0.0.0:3000
 ```
 
-or manually:
+Open `http://localhost:3000` (use `PORT=5000 python app.py` to change the port).
 
-```bash
-python3 -m venv venv
-./venv/bin/pip install -r requirements.txt
-./venv/bin/python app.py
-```
-
-Open `http://localhost:3000`.
+No virtualenv is required: the only third-party dependency is Flask
+(Jinja2 comes with it; asyncio and sqlite3 are part of the standard library).
 
 ## API
 

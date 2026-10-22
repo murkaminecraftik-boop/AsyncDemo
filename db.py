@@ -17,6 +17,7 @@ from typing import Any, Iterator
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "media_lab.db")
 
+
 SEED_MEDIA: list[dict[str, Any]] = [
     {"key": "standing-cat", "name": "Standing Cat", "kind": "gif",
      "url": "https://media.giphy.com/media/WXB88TeARFVvi/giphy.gif",

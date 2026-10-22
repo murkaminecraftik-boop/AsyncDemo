@@ -1,21 +1,6 @@
-"""Async Media Lab - Flask application.
-
-Routes
-------
-GET  /              - the single-page UI (Jinja2 template)
-GET  /api/media     - media catalog (GIFs + heavy videos) from SQLite
-POST /api/run       - run a demo mode; response is an NDJSON event stream
-GET  /api/history   - recent runs stored in SQLite
-GET  /api/health    - liveness probe
-
-The /api/run endpoint is where the async demo lives: it drives the asyncio
-engine (see engine.py) and streams one JSON event per line, so the browser
-renders results progressively - the web equivalent of the CLI printing
-"Start ... / Done ..." lines while tasks complete.
-"""
-
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from flask import Flask, Response, jsonify, render_template, request, stream_with_context
@@ -100,7 +85,8 @@ def not_found(_error: Any) -> Response:
 
 def main() -> None:
     database.init_db()
-    app.run(host="0.0.0.0", port=3000, threaded=True, debug=False, use_reloader=False)
+    port = int(os.environ.get("PORT", "3000"))
+    app.run(host="0.0.0.0", port=port, threaded=True, debug=False, use_reloader=False)
 
 
 if __name__ == "__main__":
