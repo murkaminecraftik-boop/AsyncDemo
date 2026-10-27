@@ -27,6 +27,7 @@
   const timeoutRange = $("timeout-range");
   const timeoutValue = $("timeout-value");
   const galleryHint = $("gallery-hint");
+  const stampEl = $("status-stamp");
 
   const MODE_LABELS = {
     sync: "Sequential",
@@ -44,10 +45,60 @@
     bufferingGather: false,
     gatherBuffer: [],
     sessionRuns: [],
+    taskStarts: {},   // key -> { name, t }
+    taskEnds: {},     // key -> { t, ok }
+    cancelledCount: 0,
+    ganttDrawn: false,
   };
 
   function fmtS(ms) {
     return (ms / 1000).toFixed(2) + "s";
+  }
+
+  // ---------- status stamp (section C) ----------
+  function setStamp(text, stateName) {
+    if (!stampEl) return;
+    stampEl.textContent = text;
+    stampEl.dataset.state = stateName;
+  }
+
+  // ---------- ascii task timeline, printed after a run ----------
+  function renderGantt() {
+    if (state.ganttDrawn) return;
+    const keys = Object.keys(state.taskStarts);
+    if (!keys.length) return;
+    state.ganttDrawn = true;
+
+    let last = 0;
+    keys.forEach((k) => {
+      const e = state.taskEnds[k];
+      if (e && e.t > last) last = e.t;
+    });
+    if (!last) last = 1;
+
+    logLine("task timeline, to scale", "console-header", null);
+    const WIDTH = 30;
+    keys.forEach((k) => {
+      const s = state.taskStarts[k];
+      const e = state.taskEnds[k];
+      const start = Math.min(s.t, last);
+      const end = e ? Math.min(e.t, last) : last;
+      const a = Math.round((start / last) * WIDTH);
+      const b = Math.round((end / last) * WIDTH);
+      const fill = Math.max(b - a, 1);
+      const bar =
+        "·".repeat(a) +
+        "█".repeat(fill) +
+        "·".repeat(Math.max(WIDTH - b, 0));
+      const dur = e ? ((end - start) / 1000).toFixed(2) + "s" : "—";
+      const mark = e ? (e.ok ? "" : "  × cancelled") : "  — not settled";
+      const cls = e && !e.ok ? "console-cancel" : "console-gantt";
+      logLine(
+        s.name.slice(0, 22).padEnd(22) + bar + " " + dur.padStart(6) + mark,
+        cls,
+        null
+      );
+    });
   }
 
   // ---------- console ----------
@@ -213,7 +264,7 @@
 
     const media = document.createElement("div");
     media.className = "result-media";
-    media.textContent = "✕ cancelled at " + fmtS(ev.t);
+    media.textContent = "× cancelled at " + fmtS(ev.t);
 
     const info = document.createElement("div");
     info.className = "result-info";
@@ -386,19 +437,26 @@
         state.mode = ev.mode;
         state.bufferingGather = ev.mode === "gather";
         state.gatherBuffer = [];
+        state.taskStarts = {};
+        state.taskEnds = {};
+        state.cancelledCount = 0;
+        state.ganttDrawn = false;
         galleryHint.textContent =
           ev.mode === "gather"
-            ? "gather mode: everything is rendered at once, at the end"
-            : "results appear as the server finishes them";
+            ? "gather — delivery happens all at once, at the end"
+            : "delivery order: as completed by the engine";
         setProgress(0, ev.totalTasks, "0 of " + ev.totalTasks + " tasks");
-        logLine(ev.title, "console-header", ev.t);
+        setStamp("PROCESSING", "running");
+        logLine("Requisition accepted — " + ev.title, "console-header", ev.t);
         break;
 
       case "task-start":
+        state.taskStarts[ev.key] = { name: ev.name, t: ev.t };
         logLine("Start " + ev.name + " | planned wait " + fmtS(ev.delayMs), "console-start", ev.t);
         break;
 
       case "task-done": {
+        state.taskEnds[ev.key] = { t: ev.t, ok: true };
         logLine(
           "Done " +
             ev.name +
@@ -424,6 +482,8 @@
       }
 
       case "task-cancel":
+        state.taskEnds[ev.key] = { t: ev.t, ok: false };
+        state.cancelledCount += 1;
         logLine("Cancelled " + ev.name + " (timeout limit reached)", "console-cancel", ev.t);
         addCancelledCard(ev);
         state.settledTasks += 1;
@@ -467,6 +527,8 @@
 
       case "end":
         setProgress(state.totalTasks, state.totalTasks, "finished");
+        setStamp(state.cancelledCount > 0 ? "PARTIAL" : "COMPLETE", state.cancelledCount > 0 ? "aborted" : "done");
+        renderGantt();
         break;
 
       case "error":
@@ -483,7 +545,7 @@
     if (state.running) return;
     const keys = selectedKeys();
     if (!keys.length) {
-      logLine("select at least one media item first", "console-error");
+      logLine("requisition rejected: tick at least one item in section A first", "console-error");
       return;
     }
 
@@ -542,13 +604,16 @@
       if (err && err.name === "AbortError") {
         logLine("— run aborted by user, server cancelled pending tasks —", "console-cancel");
         setProgress(state.settledTasks, Math.max(state.totalTasks, 1), "aborted");
+        setStamp("ABORTED", "aborted");
       } else {
         logLine("request failed: " + (err && err.message ? err.message : String(err)), "console-error");
+        setStamp("REJECTED", "aborted");
       }
     } finally {
       state.controller = null;
       state.bufferingGather = false;
       setRunningUI(false);
+      renderGantt();
       refreshHistory();
     }
   }
@@ -563,14 +628,10 @@
   fetch("/api/health")
     .then((r) => r.json())
     .then((d) => {
-      if (d && d.status === "ok") {
-        $("health-badge").textContent = "API ready";
-      } else {
-        $("health-badge").textContent = "API degraded";
-      }
+      $("health-badge").textContent = d && d.status === "ok" ? "ready" : "degraded";
     })
     .catch(() => {
-      $("health-badge").textContent = "API offline";
+      $("health-badge").textContent = "no reply";
     });
 
   // ---------- init ----------

@@ -1,13 +1,3 @@
-"""SQLite data layer for the Async Media Lab.
-
-Two responsibilities:
-1. Media catalog  - the "remote services" (GIFs / heavy videos) the demo fetches.
-2. Run history    - every completed demo run with per-task timings.
-
-Uses the standard library sqlite3 module only, so the project has no
-database dependencies beyond Python itself.
-"""
-
 from __future__ import annotations
 
 import os
@@ -16,7 +6,6 @@ from contextlib import contextmanager
 from typing import Any, Iterator
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "media_lab.db")
-
 
 SEED_MEDIA: list[dict[str, Any]] = [
     {"key": "standing-cat", "name": "Standing Cat", "kind": "gif",
@@ -37,6 +26,7 @@ SEED_MEDIA: list[dict[str, Any]] = [
     {"key": "kung-paw-cat", "name": "Kung Paw Cat", "kind": "gif",
      "url": "https://media.giphy.com/media/g2JO6qWbQhiV7m4AKM/giphy.gif",
      "size_mb": 5.3, "delay_ms": 3000, "sort_order": 6},
+    # --- heavy videos ---
     {"key": "sintel-trailer", "name": "Sintel: Trailer", "kind": "video",
      "url": "https://media.w3.org/2010/05/sintel/trailer.mp4",
      "size_mb": 4.0, "delay_ms": 1400, "sort_order": 7},

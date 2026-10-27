@@ -85,6 +85,10 @@ def not_found(_error: Any) -> Response:
 
 def main() -> None:
     database.init_db()
+    # threaded=True so concurrent requests each get their own streaming thread
+    # (and therefore their own event loop). use_reloader=False keeps a single
+    # predictable process. PORT can be overridden via environment variable; the
+    # default (3000) matches the platform preview proxy.
     port = int(os.environ.get("PORT", "3000"))
     app.run(host="0.0.0.0", port=port, threaded=True, debug=False, use_reloader=False)
 

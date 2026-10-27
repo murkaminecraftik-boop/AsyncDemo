@@ -35,6 +35,7 @@ MODE_TITLES = {
     "timeout": "Timeout demo",
 }
 
+# Type alias for the run-persistence callback (db.save_run).
 SaveRunFn = Callable[..., int]
 
 
@@ -48,7 +49,7 @@ async def engine(
     mode: str,
     timeout_ms: int | None,
     save_run: SaveRunFn,
-) -> Any:
+) -> Any:  # AsyncGenerator[dict[str, Any], None]
     """Yield demo events; persist the run once it finishes naturally."""
     t0 = time.perf_counter()
 
@@ -58,7 +59,7 @@ async def engine(
     sequential_ms = sum(int(item["delay_ms"]) for item in items)
     total_tasks = len(items)
     pending_tasks: list[asyncio.Task[dict[str, Any]]] = []
-    finished_tasks: list[dict[str, Any]] = []
+    finished_tasks: list[dict[str, Any]] = []  # task bookkeeping for db
 
     try:
         yield {
@@ -82,6 +83,10 @@ async def engine(
         }
         yield {"type": "log", "message": f"--- {MODE_TITLES[mode]} ---", "t": now_ms()}
 
+        # ------------------------------------------------------------------
+        # Mode 1: sync - strictly sequential, next request starts only after
+        # the previous one finished (time.sleep world).
+        # ------------------------------------------------------------------
         if mode == "sync":
             started_at = 0
             for item in items:
@@ -120,6 +125,10 @@ async def engine(
                 )
                 started_at += delay_ms
 
+        # ------------------------------------------------------------------
+        # Modes 2-4: concurrent. All tasks are created up-front (like
+        # asyncio.create_task in the CLI demo) and start simultaneously.
+        # ------------------------------------------------------------------
         else:
             finish_ms: dict[str, int] = {}
 
@@ -128,6 +137,7 @@ async def engine(
                 finish_ms[item["key"]] = now_ms()
                 return item
 
+            # Announce every start before any completion (clock ~= 0.00s).
             for item in items:
                 yield {
                     "type": "task-start",
@@ -145,6 +155,7 @@ async def engine(
             pending_tasks = tasks
 
             if mode == "gather":
+                # asyncio.gather - results processed when ALL are complete.
                 done_items = await asyncio.gather(*tasks)
                 pending_tasks = []
                 for item in done_items:
@@ -173,6 +184,7 @@ async def engine(
                     )
 
             elif mode == "stream":
+                # asyncio.as_completed - process each result as it arrives.
                 completed_count = 0
                 for coro in asyncio.as_completed(tasks):
                     item = await coro
@@ -212,6 +224,8 @@ async def engine(
                 pending_tasks = []
 
             elif mode == "timeout":
+                # asyncio.wait with timeout, then cancel pending - a faithful
+                # port of run_timeout_demo from the CLI version.
                 limit_s = (timeout_ms or 2500) / 1000
                 done_set, pending_set = await asyncio.wait(tasks, timeout=limit_s)
                 pending_tasks = []
@@ -222,6 +236,7 @@ async def engine(
                         task.cancel()
                     await asyncio.gather(*pending_set, return_exceptions=True)
 
+                # Completed tasks first (chronological), then cancellations.
                 done_items = [task.result() for task in done_set if not task.cancelled()]
                 done_items.sort(key=lambda it: finish_ms.get(it["key"], 0))
                 for item in done_items:
@@ -281,6 +296,9 @@ async def engine(
                     "t": now_ms(),
                 }
 
+        # ------------------------------------------------------------------
+        # Metrics - same idea as print_metrics / print_comparison in the CLI.
+        # ------------------------------------------------------------------
         elapsed_ms = now_ms()
         completed = len(finished_tasks) - sum(
             1 for t in finished_tasks if t["status"] == "cancelled"
@@ -316,12 +334,13 @@ async def engine(
         yield {"type": "end", "t": now_ms()}
 
     finally:
+        # If the client disconnected mid-run, make sure no tasks leak.
         if pending_tasks:
             for task in pending_tasks:
                 task.cancel()
             try:
                 await asyncio.gather(*pending_tasks, return_exceptions=True)
-            except Exception:
+            except Exception:  # noqa: BLE001 - best-effort cleanup
                 pass
 
 
@@ -348,15 +367,16 @@ def make_sync_stream(
                     event = loop.run_until_complete(agen.__anext__())
                 except StopAsyncIteration:
                     break
+                # WSGI requires bytes chunks; one JSON object per line (NDJSON).
                 yield (json.dumps(event, separators=(",", ":")) + "\n").encode("utf-8")
         finally:
             try:
                 loop.run_until_complete(agen.aclose())
-            except Exception:
+            except Exception:  # noqa: BLE001 - loop may already be broken
                 pass
             try:
                 loop.close()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
 
     return generate
