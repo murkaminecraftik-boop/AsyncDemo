@@ -1,118 +1,138 @@
 <!doctype html>
+<!--
+  async-media-fetcher
+  Hand-rolled HTML on purpose: no framework, no build step.
+  The only thing Jinja renders is the mode badge; everything else is static.
+-->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Async Media</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Barlow:wght@400;500;600;700&display=swap" rel="stylesheet">
+<title>async-media-fetcher — Flask + asyncio demo</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='2' fill='%23bf5110'/%3E%3Ctext x='8' y='12' font-family='monospace' font-size='10' fill='%23f4f0e6' text-anchor='middle'%3Ea%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
+<div class="wrap">
 
-<header class="topbar">
-  <div class="topbar-inner">
-    <h1>Async Media</h1>
+<header class="site-head">
+  <div>
+    <h1>async-media-fetcher<span class="caret" aria-hidden="true"></span></h1>
+    <p class="tagline">Flask + asyncio demo — fetch GIFs or heavyweight videos concurrently, stream each result back the moment it lands.</p>
   </div>
+  <span id="mode-badge" class="mode {{ 'sim' if mode == 'sim' else 'real' }}">{{ 'mode: sim (local fixtures)' if mode == 'sim' else 'mode: real (network)' }}</span>
 </header>
 
-<div class="stage">
-  <section class="deck" aria-label="Controls">
-    <div class="row">
-      <div class="cell">
-        <span class="label">Type</span>
-        <div class="seg" role="radiogroup" aria-label="Media type">
-          <label class="seg-item"><input type="radio" name="kind" value="gif" checked><span>GIF</span></label>
-          <label class="seg-item"><input type="radio" name="kind" value="video"><span>Video</span></label>
-          <label class="seg-item"><input type="radio" name="kind" value="mix"><span>Mix</span></label>
-        </div>
-      </div>
+<p class="intro">
+  Pick what to download, how many items, and how hard to push concurrency. The server
+  fetches every item with asyncio and pushes it to this page as soon as it is ready.
+  The five run modes mirror the command-line demo this project grew out of — same
+  patterns, same metrics, just a browser instead of a terminal.
+</p>
 
-      <div class="cell">
-        <label class="label" for="count">Count <output id="count-val">4</output></label>
-        <input type="range" id="count" min="2" max="8" value="4" step="1">
-      </div>
-
-      <div class="cell">
-        <label class="label" for="concurrency">Concurrency <output id="concurrency-val">4</output></label>
-        <input type="range" id="concurrency" min="1" max="8" value="4" step="1">
-      </div>
+<section class="box">
+  <div class="box-head"><h2><span class="no">01</span>request</h2></div>
+  <form id="form" autocomplete="off">
+    <div class="frow">
+      <span class="flabel">Type</span>
+      <span class="fctl">
+        <label><input type="radio" name="kind" value="gif" checked> GIFs</label>
+        <label><input type="radio" name="kind" value="video"> Videos</label>
+        <label><input type="radio" name="kind" value="mix"> Mix</label>
+      </span>
     </div>
-
-    <div class="row">
-      <div class="cell cell-grow">
-        <span class="label">Mode</span>
-        <div class="tabs" role="radiogroup" aria-label="Mode">
-          <label class="tab"><input type="radio" name="mode" value="stream" checked><span>Stream</span></label>
-          <label class="tab"><input type="radio" name="mode" value="gather"><span>Gather</span></label>
-          <label class="tab"><input type="radio" name="mode" value="timeout"><span>Timeout</span></label>
-          <label class="tab"><input type="radio" name="mode" value="sync"><span>Sync</span></label>
-          <label class="tab"><input type="radio" name="mode" value="compare"><span>Compare</span></label>
-        </div>
-      </div>
-
-      <div class="cell" id="timeout-row" hidden>
-        <label class="label" for="timeout">Timeout <output id="timeout-val">5</output> s</label>
-        <input type="range" id="timeout" min="1" max="15" value="5" step="0.5">
-      </div>
-
-      <div class="cell cell-actions">
-        <button id="run" type="button" class="btn btn-go">Run</button>
-        <button id="stop" type="button" class="btn btn-halt" disabled>Stop</button>
-      </div>
+    <div class="frow">
+      <span class="flabel">Run mode</span>
+      <span class="fctl">
+        <label><input type="radio" name="mode" value="stream" checked> stream</label>
+        <label><input type="radio" name="mode" value="gather"> gather</label>
+        <label><input type="radio" name="mode" value="timeout"> timeout</label>
+        <label><input type="radio" name="mode" value="sync"> sync</label>
+        <label><input type="radio" name="mode" value="compare"> compare</label>
+      </span>
     </div>
-  </section>
+    <p class="modehint" id="modehint"></p>
+    <div class="frow">
+      <span class="flabel">Batch</span>
+      <span class="fctl">
+        <label for="count">items</label>
+        <select id="count"></select>
+        <span class="pair gap"><label for="conc">concurrency</label><select id="conc"></select></span>
+        <span class="pair gap off" id="timeout-pair"><label for="timeout">timeout, s</label><select id="timeout"></select></span>
+      </span>
+    </div>
+    <div class="frow center">
+      <span class="flabel"></span>
+      <span class="fctl">
+        <button type="submit" id="run" class="btn">Start</button>
+        <button type="button" id="stop" class="btn secondary" disabled>Stop</button>
+        <span class="hint">Ctrl+Enter starts, Esc stops. Stop only detaches this page — the server finishes the batch anyway.</span>
+      </span>
+    </div>
+  </form>
+</section>
 
-  <div id="timeout-banner" class="cue" hidden></div>
+<p class="statusline" id="statusline">&gt; idle — configure a batch and press Start</p>
 
-  <div class="split">
-    <section class="panel" aria-labelledby="console-h">
-      <h2 id="console-h">Console</h2>
-      <div id="console" class="console" aria-live="polite"></div>
-    </section>
-
-    <section class="panel" aria-labelledby="media-h">
-      <h2 id="media-h">Results</h2>
-      <div id="cards" class="cards">
-        <p class="hint">Pick options, then Run.</p>
-      </div>
-    </section>
+<section class="box">
+  <div class="box-head"><h2><span class="no">02</span>results</h2><span class="box-note" id="run-note"></span></div>
+  <div class="rows" id="rows">
+    <div class="empty">Nothing here yet. In stream mode rows appear as soon as the server
+    starts and fill in one by one; in gather and compare modes everything lands at once.</div>
   </div>
+</section>
 
-  <section class="panel" id="metrics-wrap" hidden aria-labelledby="metrics-h">
-    <h2 id="metrics-h">Metrics</h2>
-    <table class="metrics"><tbody id="metrics-body"></tbody></table>
-  </section>
+<section class="box">
+  <div class="box-head"><h2><span class="no">03</span>console</h2><button type="button" id="clear" class="linkbtn">clear</button></div>
+  <div class="console" id="console" aria-live="polite"></div>
+</section>
 
-  <section class="panel" id="compare-wrap" hidden aria-labelledby="compare-h">
-    <h2 id="compare-h">Sync vs Async</h2>
-    <table class="metrics">
-      <thead><tr><th>Metric</th><th>Sync</th><th>Async</th><th>Δ</th></tr></thead>
-      <tbody id="compare-body"></tbody>
-    </table>
-  </section>
+<section class="box" id="metrics-box" hidden>
+  <div class="box-head"><h2><span class="no">04</span>metrics</h2><span class="box-note" id="metrics-note"></span></div>
+  <table class="tbl"><tbody id="metrics-body"></tbody></table>
+  <div class="hbar" id="metrics-bars"></div>
+</section>
 
-  <details class="panel howto">
-    <summary>API map</summary>
-    <table class="metrics">
-      <thead><tr><th>Mode</th><th>Endpoint</th></tr></thead>
+<section class="box" id="compare-box" hidden>
+  <div class="box-head"><h2><span class="no">05</span>sequential vs concurrent</h2><span class="box-note">same files, downloaded twice</span></div>
+  <table class="tbl">
+    <thead><tr><th></th><th class="num">sequential</th><th class="num">concurrent</th></tr></thead>
+    <tbody id="compare-body"></tbody>
+  </table>
+  <p class="verdict" id="compare-verdict"></p>
+</section>
+
+<p class="note" id="timeout-note" hidden></p>
+
+<details class="box howto">
+  <summary>How the run modes map to the CLI demo</summary>
+  <div class="inner">
+    <table class="tbl">
+      <thead><tr><th>CLI demo</th><th>This page</th></tr></thead>
       <tbody>
-        <tr><td>Sync</td><td><code>/api/stream?mode=sync</code></td></tr>
-        <tr><td>Gather</td><td><code>/api/fetch</code></td></tr>
-        <tr><td>Stream</td><td><code>/api/stream?mode=stream</code></td></tr>
-        <tr><td>Timeout</td><td><code>/api/stream?mode=timeout</code></td></tr>
-        <tr><td>Compare</td><td><code>/api/compare</code></td></tr>
+        <tr><td><code>run_sync_demo</code> — blocking loop</td><td>mode <code>sync</code> &rarr; <code>/api/stream?mode=sync</code></td></tr>
+        <tr><td><code>run_async_gather_demo</code> — <code>asyncio.gather</code></td><td>mode <code>gather</code> &rarr; <code>/api/fetch</code></td></tr>
+        <tr><td><code>run_async_streaming_demo</code> — <code>as_completed</code></td><td>mode <code>stream</code> &rarr; <code>/api/stream?mode=stream</code> (SSE)</td></tr>
+        <tr><td><code>run_timeout_demo</code> — <code>asyncio.wait</code> + cancel</td><td>mode <code>timeout</code> &rarr; <code>/api/stream?mode=timeout</code></td></tr>
+        <tr><td><code>print_comparison</code></td><td>mode <code>compare</code> &rarr; <code>/api/compare</code></td></tr>
       </tbody>
     </table>
-  </details>
+    <p class="howto-note">In sim mode the "planned wait" of each item plays the role of the
+    fixed <code>delay</code> from the CLI demo. The heavy video (30&nbsp;MB / 6.5&nbsp;s planned)
+    exists specifically so the timeout mode has something to cancel.</p>
+  </div>
+</details>
 
-  <footer class="foot">
-    Media: Giphy, test-videos.co.uk, MDN.
-    Files: <code>/media/&lt;req_id&gt;/&lt;item_id&gt;</code>
-  </footer>
+<footer>
+  <p>Sources: Giphy CDN, test-videos.co.uk (CC), MDN sample (CC0). In sim mode fixtures are generated
+  locally with Pillow/ffmpeg. Downloaded bytes are held in memory for 20 minutes and served from
+  <code>/media/&lt;req_id&gt;/&lt;item_id&gt;</code> with Range + ETag support, so videos can be scrubbed
+  in place without re-fetching bytes the browser already has.</p>
+  <p class="changelog">v0.3.1 — etag/if-range on /media, ui pass · v0.3 — plain light ui, per-item progress · v0.2 — sse progress, retries, range · v0.1 — first cut</p>
+</footer>
+
 </div>
-
+<noscript><p style="max-width:960px;margin:0 auto;padding:0 20px">This page needs JavaScript to talk to the API.</p></noscript>
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>
 </html>

@@ -1,15 +1,17 @@
 """
-app.py — асинхронный сайт на Flask: «попроси гифки или тяжёлые видео — получи их».
+app.py — a small async download site: ask for GIFs or heavyweight videos,
+the server fetches them concurrently and streams the results back.
 
-Пользователь (браузер) просит медиа, сайт параллельно (asyncio + httpx) получает
-их и отправляет пользователю: потоком через Server-Sent Events или одним JSON.
+Deliberately does NOT use Flask async views (no flask[async]/asgiref needed):
+every asyncio section runs either via asyncio.run() or on a private event
+loop inside the SSE generator. Plain `pip install flask` is enough.
 
-Соответствие CLI-демо:
-  run_sync_demo / time.sleep            -> GET /api/stream?mode=sync
-  run_async_gather_demo / gather        -> GET /api/fetch
+Mapping to the CLI demo:
+  run_sync_demo / time.sleep              -> GET /api/stream?mode=sync
+  run_async_gather_demo / gather          -> GET /api/fetch
   run_async_streaming_demo / as_completed -> GET /api/stream?mode=stream (SSE)
-  run_timeout_demo / asyncio.wait       -> GET /api/stream?mode=timeout (SSE)
-  print_comparison                      -> GET /api/compare
+  run_timeout_demo / asyncio.wait         -> GET /api/stream?mode=timeout (SSE)
+  print_comparison                        -> GET /api/compare
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 
 import httpx
@@ -30,12 +33,11 @@ app.json.ensure_ascii = False
 SSE_HEADERS = {
     "Cache-Control": "no-cache",
     "X-Accel-Buffering": "no",
-    "Connection": "keep-alive",
 }
 
 DEMO_TITLES = {
-    "stream": "Asynchronous streaming demo (as_completed)",
-    "sync": "Synchronous blocking demo (по очереди)",
+    "stream": "Async streaming demo (as_completed)",
+    "sync": "Sequential demo (blocking, one by one)",
     "timeout": "Timeout demo (asyncio.wait + cancel)",
 }
 
@@ -77,6 +79,24 @@ def pack(results, metrics, req_id: str) -> dict:
     }
 
 
+def planned_label(item: media.MediaItem, simulated: bool) -> str:
+    return (f"planned wait {item.sim_delay:.1f}s" if simulated
+            else f"~{item.size_hint_mb:.1f} MB")
+
+
+def gather_with_client(items, req_id: str, conc: int, simulated: bool):
+    """asyncio.gather на собственном loop (asyncio.run) — без async-view Flask."""
+    async def _inner():
+        sem = asyncio.Semaphore(conc)
+        async with httpx.AsyncClient(headers=media.headers(),
+                                     timeout=media.HTTP_TIMEOUT) as client:
+            return await asyncio.gather(
+                *(media.fetch_item(client, it, req_id, sem, simulated, idx=i)
+                  for i, it in enumerate(items))
+            )
+    return asyncio.run(_inner())
+
+
 # --------------------------------------------------------------------------
 # Страницы и служебные эндпоинты
 # --------------------------------------------------------------------------
@@ -109,23 +129,14 @@ def library():
 # --------------------------------------------------------------------------
 
 @app.route("/api/fetch", methods=["GET", "POST"])
-async def api_fetch():
+def api_fetch():
     kind, count, conc, _ = get_params()
     items = media.select_items(kind, count)
     simulated = media.is_simulated()
 
-    async def run(sim: bool, req: str):
-        sem = asyncio.Semaphore(conc)
-        async with httpx.AsyncClient(headers=media.headers(),
-                                     timeout=media.HTTP_TIMEOUT) as client:
-            return await asyncio.gather(
-                *(media.fetch_item(client, it, req, sem, sim, idx=i)
-                  for i, it in enumerate(items))
-            )
-
     req_id = media.new_req_id()
     t0 = time.perf_counter()
-    results = await run(simulated, req_id)
+    results = list(gather_with_client(items, req_id, conc, simulated))
     elapsed = time.perf_counter() - t0
 
     # Мягкий фолбэк: если реальная сеть недоступна (все задачи упали),
@@ -135,23 +146,19 @@ async def api_fetch():
         fallback, simulated = True, True
         req_id = media.new_req_id()
         t0 = time.perf_counter()
-        results = await run(True, req_id)
+        results = list(gather_with_client(items, req_id, conc, simulated))
         elapsed = time.perf_counter() - t0
 
-    metrics = media.compute_metrics("async gather", list(results), len(items), elapsed)
-    resp = pack(list(results), metrics, req_id)
+    metrics = media.compute_metrics("async gather", results, len(items), elapsed)
+    resp = pack(results, metrics, req_id)
     resp["fallback_simulated"] = fallback
     return jsonify(resp)
 
 
 # --------------------------------------------------------------------------
 # SSE-стрим: события на каждое завершение задачи (stream / sync / timeout)
+# + прогресс-события по байтам для асинхронных режимов
 # --------------------------------------------------------------------------
-
-def _planned_label(item: media.MediaItem, simulated: bool) -> str:
-    return (f"planned wait {item.sim_delay:.1f}s" if simulated
-            else f"~{item.size_hint_mb:.1f} MB")
-
 
 @app.get("/api/stream")
 def api_stream():
@@ -183,7 +190,7 @@ def api_stream():
             t0 = time.perf_counter()
             results = []
             for i, it in enumerate(items):
-                yield sse("log", {"msg": f"Start {it.title} | {_planned_label(it, simulated)}"})
+                yield sse("log", {"msg": f"Start {it.title} | {planned_label(it, simulated)}"})
                 r = media.fetch_item_sync(it, req_id, simulated, idx=i)
                 results.append(r)
                 clock = time.perf_counter() - t0
@@ -205,6 +212,20 @@ def api_stream():
         asyncio.set_event_loop(loop)
         q: asyncio.Queue = asyncio.Queue()
 
+        def progress_cb(item, index):
+            """Троттленный (0.35 c) прогресс по байтам -> события SSE."""
+            last = {"t": 0.0}
+
+            def cb(done: int, total_bytes: int) -> None:
+                now = time.perf_counter()
+                if now - last["t"] >= 0.35 or done >= total_bytes:
+                    last["t"] = now
+                    q.put_nowait(("progress", {
+                        "item_id": item.id, "index": index,
+                        "downloaded": done, "total": total_bytes,
+                    }))
+            return cb
+
         async def orchestrate():
             started = time.perf_counter()
             mode_name = {"stream": "async streaming", "timeout": "async timeout"}[mode]
@@ -215,9 +236,10 @@ def api_stream():
                 sem = asyncio.Semaphore(conc)
                 tasks, tmap = [], {}
                 for i, it in enumerate(items):
-                    await q.put(("log", {"msg": f"Start {it.title} | {_planned_label(it, simulated)}"}))
-                    t = loop.create_task(
-                        media.fetch_item(client, it, req_id, sem, simulated, idx=i))
+                    await q.put(("log", {"msg": f"Start {it.title} | {planned_label(it, simulated)}"}))
+                    t = loop.create_task(media.fetch_item(
+                        client, it, req_id, sem, simulated, idx=i,
+                        on_progress=progress_cb(it, i)))
                     tasks.append(t)
                     tmap[id(t)] = (it, i)
 
@@ -297,20 +319,11 @@ def api_compare():
     items = media.select_items(kind, count)
     simulated = media.is_simulated()
 
-    async def run_async():
-        req = media.new_req_id()
-        sem = asyncio.Semaphore(conc)
-        async with httpx.AsyncClient(headers=media.headers(),
-                                     timeout=media.HTTP_TIMEOUT) as client:
-            return req, await asyncio.gather(
-                *(media.fetch_item(client, it, req, sem, simulated, idx=i)
-                  for i, it in enumerate(items))
-            )
-
     t0 = time.perf_counter()
-    req_id_a, results_a = asyncio.run(run_async())
+    req_id_a = media.new_req_id()
+    results_a = list(gather_with_client(items, req_id_a, conc, simulated))
     elapsed_a = time.perf_counter() - t0
-    metrics_a = media.compute_metrics("async gather", list(results_a), len(items), elapsed_a)
+    metrics_a = media.compute_metrics("async gather", results_a, len(items), elapsed_a)
 
     req_id_s = media.new_req_id()
     t0 = time.perf_counter()
@@ -321,22 +334,81 @@ def api_compare():
 
     return jsonify({
         "simulated": simulated,
-        "async": pack(list(results_a), metrics_a, req_id_a),
-        "sync": pack(list(results_s), metrics_s, req_id_s),
+        "async": pack(results_a, metrics_a, req_id_a),
+        "sync": pack(results_s, metrics_s, req_id_s),
     })
 
 
 # --------------------------------------------------------------------------
-# Раздача скачанного медиа пользователю
+# Раздача скачанного медиа (с поддержкой Range — пауза/скролл в <video>)
 # --------------------------------------------------------------------------
+
+_RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
+
+
+def _parse_range(header: str, size: int):
+    """'bytes=a-b' -> (a, b) включительно; None — если диапазон некорректный."""
+    m = _RANGE_RE.match(header.strip())
+    if not m:
+        return None
+    s, e = m.group(1), m.group(2)
+    if s == "" and e == "":
+        return None
+    if s == "":                      # суффикс: последние N байт
+        n = int(e)
+        if n <= 0:
+            return None
+        start, end = max(0, size - n), size - 1
+    else:
+        start = int(s)
+        end = int(e) if e != "" else size - 1
+        if end >= size:
+            end = size - 1
+    if start > end or start >= size:
+        return None
+    return start, end
+
 
 @app.get("/media/<req_id>/<item_id>")
 def media_file(req_id: str, item_id: str):
     entry = media.store_get(req_id, item_id)
     if entry is None:
         abort(404)
-    resp = Response(entry["bytes"],
-                    content_type=entry["content_type"] or "application/octet-stream")
+    payload = entry["bytes"]
+    size = len(payload)
+    ctype = entry["content_type"] or "application/octet-stream"
+
+    # Strong ETag: (req_id, item_id) is unique per run and its bytes never
+    # change under the same key, so size is a stable validator. Browsers
+    # playing a big <video> issue a burst of Range requests; with an ETag
+    # they revalidate with If-Range/If-None-Match instead of re-fetching.
+    etag = f'"{req_id}-{item_id}-{size}"'
+
+    if_none_match = request.headers.get("If-None-Match", "")
+    if if_none_match and etag in [t.strip() for t in if_none_match.split(",")]:
+        resp = Response(status=304)
+        resp.headers["ETag"] = etag
+        resp.headers["Cache-Control"] = "private, max-age=600"
+        return resp
+
+    range_header = request.headers.get("Range", "")
+    if_range = request.headers.get("If-Range", "")
+    # If-Range mismatch means the client's copy is stale: serve the whole
+    # body (per RFC 7233) instead of a slice of a file it no longer has.
+    if if_range and if_range.strip() != etag:
+        range_header = ""
+    rng = _parse_range(range_header, size) if range_header else None
+    if rng:
+        start, end = rng
+        body = payload[start:end + 1]
+        resp = Response(body, status=206, content_type=ctype)
+        resp.headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+        resp.headers["Content-Length"] = str(len(body))
+    else:
+        resp = Response(payload, content_type=ctype)
+        resp.headers["Content-Length"] = str(size)
+    resp.headers["Accept-Ranges"] = "bytes"
+    resp.headers["ETag"] = etag
     if request.args.get("download"):
         resp.headers["Content-Disposition"] = f'attachment; filename="{entry["filename"]}"'
     resp.headers["Cache-Control"] = "private, max-age=600"
@@ -347,5 +419,8 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     media.detect_mode()
     media.warm_sim_assets()
-    print(f"* Async Media demo: http://127.0.0.1:{port} | режим: {media.detect_mode()}")
+    try:
+        print(f"* async-media-fetcher: http://127.0.0.1:{port} | mode: {media.detect_mode()}")
+    except UnicodeEncodeError:  # console that can't print ASCII-decorated text
+        print(f"* async-media-fetcher: http://127.0.0.1:{port}")
     app.run(host="0.0.0.0", port=port, threaded=True, debug=False, use_reloader=False)

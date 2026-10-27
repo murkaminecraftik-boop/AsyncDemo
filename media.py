@@ -1,13 +1,13 @@
 """
-media.py — «движок» асинхронного сайта: библиотека источников, загрузка, метрики.
+media.py — the "engine" behind the site: source library, downloads, metrics.
 
-Здесь живут те же паттерны asyncio, что и в CLI-демо (sync / gather /
-as_completed / asyncio.wait с таймаутом), только вместо time.sleep и
-asyncio.sleep с фиксированными задержками мы либо качаем реальные файлы
-(Giphy, test-videos.co.uk, MDN), либо имитируем загрузку в демо-режиме
-(asyncio.sleep + локальные заглушки, сгенерированные Pillow/ffmpeg).
----
-AI style comments?
+Same asyncio patterns as the CLI demo (sync / gather / as_completed /
+asyncio.wait with timeout), except the work is either real HTTP downloads
+(Giphy, test-videos.co.uk, MDN) with byte-level progress, or a simulated
+download in demo mode (local fixtures, planned delays).
+
+Progress callbacks, retries, content sniffing by magic bytes and expected
+sizes (total_bytes) for the progress bars live here too.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Callable, Optional
 
 import httpx
 
@@ -31,10 +32,12 @@ BASE_DIR = Path(__file__).resolve().parent
 SIM_DIR = BASE_DIR / "sim_assets"
 SIM_DIR.mkdir(exist_ok=True)
 
-USER_AGENT = "AsyncMediaFlaskDemo/1.0 (educational demo)"
+USER_AGENT = "AsyncMediaFlaskDemo/2.0 (educational demo)"
 HTTP_TIMEOUT = httpx.Timeout(60.0, connect=5.0)
+CHUNK_SIZE = 65536
+RETRIES = 2  # всего попыток
 
-# Принудительный демо-режим: FORCE_SIM=1 ./run  (без обращений в сеть)
+# Принудительный демо-режим: FORCE_SIM=1 (без обращений в сеть)
 FORCE_SIM = os.environ.get("FORCE_SIM", "").strip() in ("1", "true", "yes")
 
 
@@ -43,9 +46,9 @@ def headers() -> dict:
 
 
 # --------------------------------------------------------------------------
-# Библиотека медиа. size_hint_mb и url сняты реальными запросами;
+# Библиотека медиа. url и size_hint_mb сняты реальными запросами;
 # sim_delay — «плановое ожидание» в демо-режиме (аналог delay из CLI-примера).
-# Элемент с большим sim_delay (6.5 c) специально нужен для демо таймаута.
+# Элемент с большим sim_delay (6.5 c) нужен для наглядного демо таймаута.
 # --------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -59,35 +62,35 @@ class MediaItem:
 
 
 LIBRARY: list[MediaItem] = [
-    # --- GIF (Giphy CDN) ---
-    MediaItem("gif-aurora", "gif", "Гифка «Aurora»",
+    # --- GIFs (Giphy CDN); titled by asset id, that's what the URL gives us ---
+    MediaItem("gif-aurora", "gif", "Giphy JIX9t2j0ZTN9S",
               "https://media.giphy.com/media/JIX9t2j0ZTN9S/giphy.gif", 1.6, 1.8),
-    MediaItem("gif-comet", "gif", "Гифка «Comet»",
+    MediaItem("gif-comet", "gif", "Giphy 3oriO0OEd9QIDdllqo",
               "https://media.giphy.com/media/3oriO0OEd9QIDdllqo/giphy.gif", 1.4, 1.5),
-    MediaItem("gif-nebula", "gif", "Гифка «Nebula»",
+    MediaItem("gif-nebula", "gif", "Giphy 3o7TKr3nzbh5WgCFxe",
               "https://media.giphy.com/media/3o7TKr3nzbh5WgCFxe/giphy.gif", 2.0, 4.2),
-    MediaItem("gif-pulse", "gif", "Гифка «Pulse»",
+    MediaItem("gif-pulse", "gif", "Giphy 26ufdipQqU2lhNA4g",
               "https://media.giphy.com/media/26ufdipQqU2lhNA4g/giphy.gif", 0.8, 0.5),
-    MediaItem("gif-quasar", "gif", "Гифка «Quasar»",
+    MediaItem("gif-quasar", "gif", "Giphy l3q2K5jinAlChoCLS",
               "https://media.giphy.com/media/l3q2K5jinAlChoCLS/giphy.gif", 1.1, 0.9),
-    MediaItem("gif-vega", "gif", "Гифка «Vega»",
+    MediaItem("gif-vega", "gif", "Giphy l0MYt5jPR6QX5pnqM",
               "https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/giphy.gif", 2.2, 4.7),
-    # --- Видео (test-videos.co.uk, CC; MDN sample, CC0) ---
-    MediaItem("vid-flower", "video", "Цветок (MDN, 1.1 МБ)",
+    # --- Videos (test-videos.co.uk, CC; MDN sample, CC0) ---
+    MediaItem("vid-flower", "video", "Flower (MDN sample, 1.1 MB)",
               "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4", 1.2, 1.1),
-    MediaItem("vid-bbb-360", "video", "Big Buck Bunny 360p (1 МБ)",
+    MediaItem("vid-bbb-360", "video", "Big Buck Bunny 360p (1 MB)",
               "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4", 1.4, 1.0),
-    MediaItem("vid-bbb-720s", "video", "Big Buck Bunny 720p (2 МБ)",
+    MediaItem("vid-bbb-720s", "video", "Big Buck Bunny 720p (2 MB)",
               "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_2MB.mp4", 1.8, 2.0),
-    MediaItem("vid-bbb-720m", "video", "Big Buck Bunny 720p (5 МБ)",
+    MediaItem("vid-bbb-720m", "video", "Big Buck Bunny 720p (5 MB)",
               "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_5MB.mp4", 2.4, 5.0),
-    MediaItem("vid-jelly-720", "video", "Jellyfish 720p (5 МБ)",
+    MediaItem("vid-jelly-720", "video", "Jellyfish 720p (5 MB)",
               "https://test-videos.co.uk/vids/jellyfish/mp4/h264/720/Jellyfish_720_10s_5MB.mp4", 2.6, 5.2),
-    MediaItem("vid-bbb-1080m", "video", "Big Buck Bunny 1080p (10 МБ)",
+    MediaItem("vid-bbb-1080m", "video", "Big Buck Bunny 1080p (10 MB)",
               "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/1080/Big_Buck_Bunny_1080_10s_10MB.mp4", 3.4, 10.5),
-    MediaItem("vid-sintel-1080", "video", "Sintel 1080p (20 МБ)",
+    MediaItem("vid-sintel-1080", "video", "Sintel 1080p (20 MB)",
               "https://test-videos.co.uk/vids/sintel/mp4/h264/1080/Sintel_1080_10s_20MB.mp4", 4.6, 21.0),
-    MediaItem("vid-bbb-heavy", "video", "Тяжёлое: Big Buck Bunny 1080p (30 МБ)",
+    MediaItem("vid-bbb-heavy", "video", "Big Buck Bunny 1080p (30 MB, heavy)",
               "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/1080/Big_Buck_Bunny_1080_10s_30MB.mp4", 6.5, 30.7),
 ]
 
@@ -96,7 +99,7 @@ LIBRARY: list[MediaItem] = [
 # Режим работы: реальные загрузки ("real") или локальная имитация ("sim")
 # --------------------------------------------------------------------------
 
-_mode_cache: str | None = None
+_mode_cache: Optional[str] = None
 _mode_lock = threading.Lock()
 
 
@@ -138,7 +141,7 @@ def select_items(kind: str, count: int) -> list[MediaItem]:
 
 _STORE: dict[tuple[str, str], dict] = {}
 _STORE_LOCK = threading.Lock()
-_STORE_TTL = 20 * 60                 # секунды
+_STORE_TTL = 20 * 60                  # секунды
 _STORE_MAX_BYTES = 250 * 1024 * 1024  # 250 МБ
 
 
@@ -167,7 +170,7 @@ def store_put(req_id: str, item_id: str, payload: bytes, content_type: str, file
             del _STORE[k]
 
 
-def store_get(req_id: str, item_id: str) -> dict | None:
+def store_get(req_id: str, item_id: str) -> Optional[dict]:
     with _STORE_LOCK:
         entry = _STORE.get((req_id, item_id))
         if entry:
@@ -187,9 +190,10 @@ class FetchResult:
     title: str
     kind: str
     ok: bool
-    elapsed: float          # собственное время загрузки (без ожидания семафора)
+    elapsed: float           # собственное время загрузки (без ожидания семафора)
     size_bytes: int
     content_type: str
+    total_bytes: int = 0     # ожидаемый размер (Content-Length / size_hint)
     media_url: str = ""
     error: str = ""
     simulated: bool = False
@@ -230,6 +234,39 @@ def compute_metrics(mode: str, results: list[FetchResult], total: int,
         simulated=(results[0].simulated if results else is_simulated()),
         cancelled=cancelled,
     )
+
+
+# --------------------------------------------------------------------------
+# Вспомогательное: сниффинг контента по магическим байтам
+# --------------------------------------------------------------------------
+
+def _sniff(payload: bytes, ctype: str, fallback_kind: str) -> str:
+    """Приводим content-type к честному: доверяем серверу, иначе смотрим байты."""
+    ctype = (ctype or "").split(";")[0].strip().lower()
+    if ctype.startswith(("image/", "video/")):
+        return ctype
+    head = payload[:16]
+    if head.startswith(b"GIF8"):
+        return "image/gif"
+    if len(head) >= 8 and head[4:8] == b"ftyp":
+        return "video/mp4"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if head.startswith(b"\x89PNG"):
+        return "image/png"
+    if head.startswith(b"\x1f\x8b"):
+        return "application/gzip"
+    return ctype or ("image/gif" if fallback_kind == "gif" else "video/mp4")
+
+
+def _ext_for(content_type: str, kind: str) -> str:
+    if content_type.startswith("image/gif"):
+        return "gif"
+    if "mp4" in content_type:
+        return "mp4"
+    if content_type.startswith("image/"):
+        return "img"
+    return "gif" if kind == "gif" else "bin"
 
 
 # --------------------------------------------------------------------------
@@ -327,49 +364,90 @@ def warm_sim_assets() -> None:
 
 
 # --------------------------------------------------------------------------
-# Загрузка: асинхронная (httpx) и синхронная (requests) версии
+# Загрузка: асинхронная (httpx, с прогрессом) и синхронная (requests)
 # --------------------------------------------------------------------------
 
-def _ext_for(content_type: str, kind: str) -> str:
-    if content_type.startswith("image/gif"):
-        return "gif"
-    if "mp4" in content_type:
-        return "mp4"
-    return "gif" if kind == "gif" else "bin"
+ProgressCB = Optional[Callable[[int, int], None]]
+
+
+def _finalize(req_id: str, item: MediaItem, idx: int, elapsed: float, payload: bytes,
+              ctype: str, simulated: bool) -> FetchResult:
+    ctype = _sniff(payload, ctype, item.kind)
+    res = FetchResult(
+        req_id=req_id, index=idx, item_id=item.id, title=item.title,
+        kind=item.kind, ok=True, elapsed=elapsed, size_bytes=len(payload),
+        content_type=ctype, total_bytes=len(payload), simulated=simulated,
+    )
+    ext = _ext_for(ctype, item.kind)
+    store_put(req_id, item.id, payload, ctype, f"{item.id}.{ext}")
+    res.media_url = f"/media/{req_id}/{item.id}"
+    return res
+
+
+def _fail(req_id: str, item: MediaItem, idx: int, elapsed: float, err: str,
+          simulated: bool) -> FetchResult:
+    return FetchResult(
+        req_id=req_id, index=idx, item_id=item.id, title=item.title,
+        kind=item.kind, ok=False, elapsed=elapsed, size_bytes=0,
+        content_type="", error=err, simulated=simulated,
+    )
 
 
 async def fetch_item(client: httpx.AsyncClient, item: MediaItem, req_id: str,
-                     sem: asyncio.Semaphore, simulated: bool, idx: int = 0) -> FetchResult:
+                     sem: asyncio.Semaphore, simulated: bool, idx: int = 0,
+                     on_progress: ProgressCB = None) -> FetchResult:
     """Одна «задача»: скачать элемент. Тайминги меряются после входа в семафор,
-    чтобы сумма отдельных времён была честной оценкой последовательной работы."""
+    чтобы сумма отдельных времён была честной оценкой последовательной работы.
+    on_progress(downloaded, total) вызывается из того же event loop."""
     async with sem:
         t0 = time.perf_counter()
-        ok, err = True, ""
-        payload, ctype = b"", ""
-        try:
-            if simulated:
-                # имитация «сети»: спим sim_delay с небольшим джиттером
-                await asyncio.sleep(item.sim_delay * random.uniform(0.9, 1.15))
+
+        if simulated:
+            # Виртуальная «загрузка»: спим sim_delay с джиттером, отдаём прогресс по времени
+            total = int(item.size_hint_mb * 1_000_000) or 1
+            delay = item.sim_delay * random.uniform(0.9, 1.15)
+            steps = 24
+            for i in range(1, steps + 1):
+                await asyncio.sleep(delay / steps)
+                if on_progress:
+                    on_progress(int(total * i / steps), total)
+            try:
                 payload, ctype = placeholder_payload(item)
-            else:
-                resp = await client.get(item.url, follow_redirects=True)
-                resp.raise_for_status()
-                payload = resp.content
-                ctype = resp.headers.get("content-type", "") or (
-                    "image/gif" if item.kind == "gif" else "video/mp4")
-        except Exception as e:  # noqa: BLE001 — показываем ошибку в UI
-            ok, err = False, f"{type(e).__name__}: {e}"
-        elapsed = time.perf_counter() - t0
-        res = FetchResult(
-            req_id=req_id, index=idx, item_id=item.id, title=item.title,
-            kind=item.kind, ok=ok, elapsed=elapsed, size_bytes=len(payload),
-            content_type=ctype, error=err, simulated=simulated,
-        )
-        if ok and payload:
-            ext = _ext_for(ctype, item.kind)
-            store_put(req_id, item.id, payload, ctype, f"{item.id}.{ext}")
-            res.media_url = f"/media/{req_id}/{item.id}"
-        return res
+            except Exception as e:  # noqa: BLE001
+                return _fail(req_id, item, idx, time.perf_counter() - t0,
+                             f"{type(e).__name__}: {e}", True)
+            return _finalize(req_id, item, idx, time.perf_counter() - t0, payload, ctype, True)
+
+        # Реальная загрузка потоком, с ретраем
+        err = ""
+        for attempt in range(1, RETRIES + 1):
+            try:
+                buf = bytearray()
+                ctype, total = "", 0
+                last_emit = 0.0
+                async with client.stream("GET", item.url, follow_redirects=True) as resp:
+                    if resp.status_code >= 400:
+                        raise httpx.HTTPStatusError(
+                            f"HTTP {resp.status_code}", request=resp.request, response=resp)
+                    ctype = resp.headers.get("content-type", "")
+                    cl = resp.headers.get("content-length", "")
+                    total = int(cl) if cl.isdigit() else int(item.size_hint_mb * 1_000_000)
+                    async for chunk in resp.aiter_bytes(CHUNK_SIZE):
+                        buf.extend(chunk)
+                        if on_progress:
+                            now = time.perf_counter()
+                            if now - last_emit > 0.35 or len(buf) >= total:
+                                last_emit = now
+                                on_progress(len(buf), total)
+                if on_progress:
+                    on_progress(len(buf), total)
+                return _finalize(req_id, item, idx,
+                                 time.perf_counter() - t0, bytes(buf), ctype, False)
+            except Exception as e:  # noqa: BLE001
+                err = f"{type(e).__name__}: {e}"
+                if attempt < RETRIES:
+                    await asyncio.sleep(0.5)
+        return _fail(req_id, item, idx, time.perf_counter() - t0, err, False)
 
 
 def fetch_item_sync(item: MediaItem, req_id: str, simulated: bool, idx: int = 0) -> FetchResult:
@@ -377,32 +455,28 @@ def fetch_item_sync(item: MediaItem, req_id: str, simulated: bool, idx: int = 0)
     import requests
 
     t0 = time.perf_counter()
-    ok, err = True, ""
-    payload, ctype = b"", ""
-    try:
-        if simulated:
+    if simulated:
+        try:
             time.sleep(item.sim_delay * random.uniform(0.9, 1.15))
             payload, ctype = placeholder_payload(item)
-        else:
+        except Exception as e:  # noqa: BLE001
+            return _fail(req_id, item, idx, time.perf_counter() - t0,
+                         f"{type(e).__name__}: {e}", True)
+        return _finalize(req_id, item, idx, time.perf_counter() - t0, payload, ctype, True)
+
+    err = ""
+    for attempt in range(1, RETRIES + 1):
+        try:
             resp = requests.get(item.url, headers=headers(),
                                 timeout=(10, 60), allow_redirects=True)
             resp.raise_for_status()
-            payload = resp.content
-            ctype = resp.headers.get("content-type", "") or (
-                "image/gif" if item.kind == "gif" else "video/mp4")
-    except Exception as e:  # noqa: BLE001
-        ok, err = False, f"{type(e).__name__}: {e}"
-    elapsed = time.perf_counter() - t0
-    res = FetchResult(
-        req_id=req_id, index=idx, item_id=item.id, title=item.title,
-        kind=item.kind, ok=ok, elapsed=elapsed, size_bytes=len(payload),
-        content_type=ctype, error=err, simulated=simulated,
-    )
-    if ok and payload:
-        ext = _ext_for(ctype, item.kind)
-        store_put(req_id, item.id, payload, ctype, f"{item.id}.{ext}")
-        res.media_url = f"/media/{req_id}/{item.id}"
-    return res
+            return _finalize(req_id, item, idx, time.perf_counter() - t0,
+                             resp.content, resp.headers.get("content-type", ""), False)
+        except Exception as e:  # noqa: BLE001
+            err = f"{type(e).__name__}: {e}"
+            if attempt < RETRIES:
+                time.sleep(0.5)
+    return _fail(req_id, item, idx, time.perf_counter() - t0, err, False)
 
 
 def new_req_id() -> str:
