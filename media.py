@@ -6,6 +6,8 @@ as_completed / asyncio.wait с таймаутом), только вместо ti
 asyncio.sleep с фиксированными задержками мы либо качаем реальные файлы
 (Giphy, test-videos.co.uk, MDN), либо имитируем загрузку в демо-режиме
 (asyncio.sleep + локальные заглушки, сгенерированные Pillow/ffmpeg).
+---
+AI style comments?
 """
 
 from __future__ import annotations
