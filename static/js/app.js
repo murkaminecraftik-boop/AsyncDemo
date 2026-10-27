@@ -1,13 +1,7 @@
-// async-media-fetcher — client script.
-// Talks to /api/stream (SSE), /api/fetch and /api/compare (JSON).
-// No dependencies. Rows are built with createElement (never innerHTML for
-// server data) so a weird title from a CDN can't inject markup.
-
 "use strict";
 
 const $ = (sel) => document.querySelector(sel);
 
-/* ---------- formatting ---------- */
 
 const fmtSecs = (v) => `${Number(v).toFixed(2)} s`;
 const fmtMB = (b) => `${(b / 1e6).toFixed(1)} MB`;
@@ -17,7 +11,6 @@ function safeParse(e) {
   try { return JSON.parse(e.data); } catch { return null; }
 }
 
-/* ---------- dom refs ---------- */
 
 const els = {
   status: $("#statusline"),
@@ -48,20 +41,18 @@ const MODE_HINTS = {
   compare: "Downloads the same batch twice — blocking first, then concurrent — and reports both timings. Capped at 4 items.",
 };
 
-/* ---------- state ---------- */
 
 const state = {
   running: false,
-  es: null,          // EventSource, when in an SSE mode
-  abort: null,       // AbortController, when in a JSON mode
+  es: null,
+  abort: null,
   t0: 0,
   total: 0,
   done: 0,
-  bytes: new Map(),  // item_id -> downloaded bytes, for the status line
+  bytes: new Map(),
   timer: null,
 };
 
-/* ---------- console ---------- */
 
 function log(kind, msg) {
   const box = els.console;
@@ -71,7 +62,6 @@ function log(kind, msg) {
   ts.className = "ts";
   ts.textContent = clock();
   line.append(ts, document.createTextNode(msg));
-  // stick to the bottom unless the user scrolled up to read something
   const stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
   box.appendChild(line);
   while (box.childElementCount > 500) box.firstChild.remove();
@@ -80,7 +70,6 @@ function log(kind, msg) {
 
 $("#clear").addEventListener("click", () => els.console.replaceChildren());
 
-/* ---------- status line ---------- */
 
 function setStatus(text, busy) {
   els.status.textContent = "> " + text;
@@ -125,7 +114,6 @@ function finish(msg) {
   setRunning(false);
 }
 
-/* ---------- result rows ---------- */
 
 function addRows(items) {
   els.rows.replaceChildren();
@@ -185,9 +173,9 @@ function setProgress(itemId, downloaded, total) {
 
 function completeRow(r) {
   const row = rowOf(r.item_id);
-  if (!row || row.dataset.done) return;  // one <video>/<img> per row, ever —
-  row.dataset.done = "1";                // re-appending resets src and the
-  state.done += 1;                       // browser re-downloads the media
+  if (!row || row.dataset.done) return;
+  row.dataset.done = "1";
+  state.done += 1;
   state.bytes.set(r.item_id, r.size_bytes);
   const stat = row.querySelector(".stat");
   row.classList.remove("running");
@@ -244,7 +232,6 @@ function failRow(d) {
   row.querySelector(".stat").textContent = `failed — ${d.message || "error"}`;
 }
 
-/* ---------- metrics / compare ---------- */
 
 function hbar(label, secs, max, seq) {
   const wrap = document.createElement("div");
@@ -325,7 +312,6 @@ function renderCompare(d) {
   log("ok", `sync ${s.elapsed.toFixed(2)}s vs async ${a.elapsed.toFixed(2)}s (${speedup.toFixed(1)}x)`);
 }
 
-/* ---------- run modes ---------- */
 
 function resetRun(note) {
   state.done = 0;
@@ -338,8 +324,6 @@ function resetRun(note) {
   els.timeoutNote.hidden = true;
 }
 
-// SSE. One thing to remember: EventSource reconnects on its own unless we
-// close it — so every exit path (metrics, error, Stop) must call close().
 function openStream(mode) {
   const p = new URLSearchParams(formParams());
   p.set("mode", mode);
@@ -414,7 +398,6 @@ async function runGather() {
     const d = await resp.json();
     state.total = d.items.length;
     if (d.fallback_simulated) log("warn", "network unreachable — server fell back to sim mode");
-    // gather gives no progress: rows go straight from "queued" to done
     addRows(d.items.map((r) => ({ item_id: r.item_id, title: r.title, kind: r.kind })));
     d.items.forEach(completeRow);
     renderMetrics(d.metrics);
@@ -448,7 +431,6 @@ async function runCompare() {
   }
 }
 
-/* ---------- wiring ---------- */
 
 function formParams() {
   return {

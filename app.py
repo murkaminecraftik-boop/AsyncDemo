@@ -1,19 +1,3 @@
-"""
-app.py — a small async download site: ask for GIFs or heavyweight videos,
-the server fetches them concurrently and streams the results back.
-
-Deliberately does NOT use Flask async views (no flask[async]/asgiref needed):
-every asyncio section runs either via asyncio.run() or on a private event
-loop inside the SSE generator. Plain `pip install flask` is enough.
-
-Mapping to the CLI demo:
-  run_sync_demo / time.sleep              -> GET /api/stream?mode=sync
-  run_async_gather_demo / gather          -> GET /api/fetch
-  run_async_streaming_demo / as_completed -> GET /api/stream?mode=stream (SSE)
-  run_timeout_demo / asyncio.wait         -> GET /api/stream?mode=timeout (SSE)
-  print_comparison                        -> GET /api/compare
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -42,9 +26,6 @@ DEMO_TITLES = {
 }
 
 
-# --------------------------------------------------------------------------
-# Вспомогательное
-# --------------------------------------------------------------------------
 
 def get_params():
     kind = request.args.get("kind", "gif")
@@ -97,9 +78,7 @@ def gather_with_client(items, req_id: str, conc: int, simulated: bool):
     return asyncio.run(_inner())
 
 
-# --------------------------------------------------------------------------
-# Страницы и служебные эндпоинты
-# --------------------------------------------------------------------------
+
 
 @app.get("/")
 def index():
@@ -124,9 +103,6 @@ def library():
     })
 
 
-# --------------------------------------------------------------------------
-# Режим gather: asyncio.gather — ответ одним JSON, когда всё готово
-# --------------------------------------------------------------------------
 
 @app.route("/api/fetch", methods=["GET", "POST"])
 def api_fetch():
@@ -139,8 +115,6 @@ def api_fetch():
     results = list(gather_with_client(items, req_id, conc, simulated))
     elapsed = time.perf_counter() - t0
 
-    # Мягкий фолбэк: если реальная сеть недоступна (все задачи упали),
-    # повторяем в демо-режиме, чтобы демо всегда работало.
     fallback = False
     if not simulated and results and all(not r.ok for r in results):
         fallback, simulated = True, True
@@ -154,11 +128,6 @@ def api_fetch():
     resp["fallback_simulated"] = fallback
     return jsonify(resp)
 
-
-# --------------------------------------------------------------------------
-# SSE-стрим: события на каждое завершение задачи (stream / sync / timeout)
-# + прогресс-события по байтам для асинхронных режимов
-# --------------------------------------------------------------------------
 
 @app.get("/api/stream")
 def api_stream():
@@ -185,7 +154,6 @@ def api_stream():
         })
         yield sse("log", {"msg": f"--- {DEMO_TITLES[mode]} ---"})
 
-        # ---------- sync: блокирующие загрузки по очереди ----------
         if mode == "sync":
             t0 = time.perf_counter()
             results = []
@@ -207,13 +175,11 @@ def api_stream():
                 "sync sequential", results, total, elapsed).as_dict())
             return
 
-        # ---------- асинхронные режимы: свой event loop на этот запрос ----------
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         q: asyncio.Queue = asyncio.Queue()
 
         def progress_cb(item, index):
-            """Троттленный (0.35 c) прогресс по байтам -> события SSE."""
             last = {"t": 0.0}
 
             def cb(done: int, total_bytes: int) -> None:
@@ -308,14 +274,11 @@ def api_stream():
     return Response(generate(), mimetype="text/event-stream", headers=SSE_HEADERS)
 
 
-# --------------------------------------------------------------------------
-# Сравнение sync vs async на одних и тех же файлах
-# --------------------------------------------------------------------------
 
 @app.get("/api/compare")
 def api_compare():
     kind, count, conc, _ = get_params()
-    count = min(count, 4)  # sync-часть качает всё по очереди — не мучаем пользователя
+    count = min(count, 4)
     items = media.select_items(kind, count)
     simulated = media.is_simulated()
 
@@ -339,22 +302,18 @@ def api_compare():
     })
 
 
-# --------------------------------------------------------------------------
-# Раздача скачанного медиа (с поддержкой Range — пауза/скролл в <video>)
-# --------------------------------------------------------------------------
 
 _RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
 
 
 def _parse_range(header: str, size: int):
-    """'bytes=a-b' -> (a, b) включительно; None — если диапазон некорректный."""
     m = _RANGE_RE.match(header.strip())
     if not m:
         return None
     s, e = m.group(1), m.group(2)
     if s == "" and e == "":
         return None
-    if s == "":                      # суффикс: последние N байт
+    if s == "":
         n = int(e)
         if n <= 0:
             return None
@@ -378,10 +337,6 @@ def media_file(req_id: str, item_id: str):
     size = len(payload)
     ctype = entry["content_type"] or "application/octet-stream"
 
-    # Strong ETag: (req_id, item_id) is unique per run and its bytes never
-    # change under the same key, so size is a stable validator. Browsers
-    # playing a big <video> issue a burst of Range requests; with an ETag
-    # they revalidate with If-Range/If-None-Match instead of re-fetching.
     etag = f'"{req_id}-{item_id}-{size}"'
 
     if_none_match = request.headers.get("If-None-Match", "")
@@ -393,8 +348,6 @@ def media_file(req_id: str, item_id: str):
 
     range_header = request.headers.get("Range", "")
     if_range = request.headers.get("If-Range", "")
-    # If-Range mismatch means the client's copy is stale: serve the whole
-    # body (per RFC 7233) instead of a slice of a file it no longer has.
     if if_range and if_range.strip() != etag:
         range_header = ""
     rng = _parse_range(range_header, size) if range_header else None
@@ -421,6 +374,6 @@ if __name__ == "__main__":
     media.warm_sim_assets()
     try:
         print(f"* async-media-fetcher: http://127.0.0.1:{port} | mode: {media.detect_mode()}")
-    except UnicodeEncodeError:  # console that can't print ASCII-decorated text
+    except UnicodeEncodeError:
         print(f"* async-media-fetcher: http://127.0.0.1:{port}")
     app.run(host="0.0.0.0", port=port, threaded=True, debug=False, use_reloader=False)

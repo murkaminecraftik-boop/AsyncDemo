@@ -1,8 +1,3 @@
-/* async-media-fetcher — single stylesheet, no preprocessor.
-   The look I was going for: a bench notes page. Warm paper, ink text, one
-   rust accent, mono for anything that is data or a label, dotted rules
-   instead of designer shadows. If it looks like a backend dev made it in an
-   evening — good. */
 
 :root {
   --paper: #f4f0e6;
@@ -27,7 +22,6 @@
 body {
   margin: 0;
   background-color: var(--paper);
-  /* faint graph-paper dot grid, barely there */
   background-image: radial-gradient(rgba(41, 36, 26, .055) 1px, transparent 1.2px);
   background-size: 22px 22px;
   color: var(--ink);
@@ -48,7 +42,6 @@ code {
   background: var(--line-soft); padding: 1px 5px; border-radius: 2px;
 }
 
-/* ---- header ---- */
 
 .site-head {
   display: flex; justify-content: space-between; align-items: baseline;
@@ -61,7 +54,6 @@ h1 {
   letter-spacing: .2px;
 }
 
-/* the little block cursor after the title; blinks like a terminal */
 .caret {
   display: inline-block; width: 8px; height: 15px; margin-left: 6px;
   background: var(--accent); vertical-align: -2px;
@@ -86,7 +78,6 @@ h1 {
 
 .intro { color: var(--ink-2); font-size: 13.5px; max-width: 74ch; margin: 16px 0 22px; }
 
-/* ---- boxes / sections ---- */
 
 .box { border: 1px solid var(--line); background: var(--panel); border-radius: 2px; margin-bottom: 18px; overflow: hidden; }
 
@@ -109,7 +100,6 @@ h2 .no { color: var(--accent); margin-right: 8px; }
 }
 .linkbtn:hover { text-decoration: underline; }
 
-/* ---- request form ---- */
 
 form { padding: 14px; display: grid; gap: 11px; }
 .frow { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
@@ -143,7 +133,6 @@ select {
 
 .hint { color: var(--ink-2); font-size: 12px; margin-left: 6px; }
 
-/* ---- status line ---- */
 
 .statusline {
   font-family: var(--mono); font-size: 12.5px; color: var(--ink-2);
@@ -151,7 +140,6 @@ select {
 }
 .statusline.busy { color: var(--accent); }
 
-/* ---- results ---- */
 
 .rows .empty {
   padding: 30px 16px; text-align: center; color: var(--ink-2);
@@ -172,11 +160,9 @@ select {
 .row.fail .stat { color: var(--err); }
 .row.cancelled .stat { color: var(--warn); }
 
-/* fixed-height bar so rows don't jump while streaming */
 .track { height: 6px; margin-top: 8px; border-radius: 1px; background: var(--line-soft); overflow: hidden; }
 .track .fill { height: 100%; width: 0; background: var(--accent); transition: width .25s linear; }
 
-/* diagonal stripes crawl while the row is actually downloading */
 .row.running .fill {
   background-image: repeating-linear-gradient(45deg,
     var(--accent) 0 6px, var(--accent-deep) 6px 12px);
@@ -194,7 +180,6 @@ select {
   border: 1px solid var(--line); border-radius: 2px; background: #fff;
 }
 
-/* ---- console ---- */
 
 .console {
   height: 240px; overflow-y: auto; padding: 10px 14px;
@@ -212,7 +197,6 @@ select {
 .console .info { color: #e0a458; }
 .console .warn { color: #d8b13c; }
 
-/* ---- tables (metrics / compare / howto) ---- */
 
 .tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .tbl th, .tbl td { text-align: left; padding: 7px 14px; border-bottom: 1px dotted var(--line); }
@@ -221,7 +205,6 @@ select {
 .tbl .num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
 td.pos { color: var(--ok); font-weight: 600; }
 
-/* horizontal bars under the metrics table */
 .hbar { padding: 6px 14px 14px; }
 .hrow { margin-top: 9px; }
 .hrow .lab {
@@ -234,7 +217,6 @@ td.pos { color: var(--ok); font-weight: 600; }
 
 .verdict { margin: 4px 14px 14px; font-size: 13px; font-weight: 600; }
 
-/* ---- notes / howto / footer ---- */
 
 .note {
   border: 1px solid rgba(150, 112, 14, .5); background: #f5ecd2; color: var(--warn);
@@ -254,7 +236,6 @@ footer .changelog {
   border-top: 1px dotted var(--line); padding-top: 8px;
 }
 
-/* ---- small screens ---- */
 
 @media (max-width: 640px) {
   .flabel { width: auto; text-align: left; }
