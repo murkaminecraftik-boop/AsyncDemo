@@ -1,100 +1,114 @@
-# ⚡ Async Media Lab
+# Async Media Fetcher — Flask + asyncio
 
-A full-stack demo of **Python asyncio on the web**: request GIFs and heavy videos,
-and the Flask backend "fetches" them concurrently (or sequentially — your choice)
-while streaming every event to the browser over a single HTTP response.
+Асинхронный веб-сайт: пользователь просит гифки или тяжёлые видео — сайт
+параллельно получает их (asyncio + httpx) и отправляет пользователю потоком
+(Server-Sent Events) с живыми метриками. Это веб-версия CLI-демо асинхронности:
+все режимы (`sync` / `gather` / `as_completed` / `timeout` / сравнение) перенесены
+из консоли в браузер.
 
-It is the direct web port of the classic CLI asyncio demo
-(`time.sleep` vs `asyncio.gather` vs `asyncio.as_completed` vs `asyncio.wait(timeout=...)`):
-
-| CLI demo | Web demo | Behaviour |
-| --- | --- | --- |
-| `run_sync_demo` | **Sequential** | one request at a time; total ≈ **sum** of all waits |
-| `run_async_gather_demo` | **Gather** | all at once via `asyncio.gather`; results rendered when the last finishes; total ≈ **max** wait |
-| `run_async_streaming_demo` | **Streaming** | `asyncio.as_completed`; each result is streamed to the page the moment it is done |
-| `run_timeout_demo` | **Timeout** | `asyncio.wait(timeout=...)`; everything slower than the limit is cancelled |
-
-## Architecture
-
-```
-flask_app/
-├── app.py              # Flask routes: / , /api/media , /api/run (NDJSON stream), /api/history
-├── engine.py           # asyncio engine: async generator per mode, wrapped in a sync generator for WSGI
-├── db.py               # SQLite layer: media catalog + run history (schema, seed, queries)
-├── requirements.txt    # flask (the only third-party dependency)
-├── templates/
-│   └── index.html      # single-page UI (Jinja2)
-└── static/
-    ├── css/style.css   # dark "observability" theme, responsive, no frameworks
-    └── js/app.js       # NDJSON stream reader, live console, gallery, metrics, history
-└── data/
-    └── media_lab.db    # SQLite (created automatically)
-```
-
-### How the async part works
-
-Flask is WSGI, so a response body must be a *sync* iterator.
-`engine.make_sync_stream()` bridges the two worlds: it creates a private
-event loop per request and advances the async generator one event at a time
-with `loop.run_until_complete(agen.__anext__())`. Each event is serialized as
-one NDJSON line (`application/x-ndjson`), so the browser's `fetch` + `ReadableStream`
-reader renders results progressively — the web equivalent of the CLI printing
-`Start ... / Done ...` lines while tasks complete.
-
-The simulated "heavy fetch" is `await asyncio.sleep(delay_ms / 1000)` per media
-item, proportional to the real file size (videos are slow, GIFs are fast), with
-the real files delivered afterwards from their public CDNs.
-
-### Database
-
-SQLite (stdlib `sqlite3`) with three tables:
-
-- `media_items` — the catalog: 6 animated GIFs + 5 heavy videos (real URLs, real sizes)
-- `runs` — one row per completed demo run (mode, timings, throughput)
-- `run_tasks` — one row per task with per-task start/finish timestamps
-
-## Running
+## Быстрый старт
 
 ```bash
-cd flask_app
+python3 -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-python app.py       # starts Flask on http://0.0.0.0:3000
+python app.py
+# откройте http://127.0.0.1:5000
 ```
 
-Open `http://localhost:3000` (use `PORT=5000 python app.py` to change the port).
+Переменные окружения:
 
-No virtualenv is required: the only third-party dependency is Flask
-(Jinja2 comes with it; asyncio and sqlite3 are part of the standard library).
+| Переменная | По умолчанию | Описание |
+|---|---|---|
+| `PORT` | `5000` | порт сервера |
+| `FORCE_SIM` | — | `FORCE_SIM=1` — принудительный демо-режим без обращений в сеть |
+
+## Два режима работы
+
+- **real** (по умолчанию): сайт реально скачивает файлы из сети — GIF с Giphy CDN,
+  видео с test-videos.co.uk (CC) и MDN (CC0). Байты складываются во временное
+  хранилище и раздаются браузеру через `/media/<req_id>/<item_id>`.
+- **sim** (включается автоматически, если сеть недоступна, или через `FORCE_SIM=1`):
+  «загрузка» имитируется `asyncio.sleep` с плановыми задержками (аналог `delay`
+  из CLI-примера), а вместо файлов отдаются локальные заглушки — анимированные
+  GIF (Pillow) и mp4 (ffmpeg `testsrc2`). Идеален для демонстрации таймаута:
+  «тяжёлое видео» имеет плановую задержку 6.5 с и гарантированно отменяется
+  при таймауте 3–5 с.
+
+Режим определяется при старте (проверка доступности сети), бейдж в шапке
+страницы показывает текущий режим. Если в real-режиме сеть недоступна
+(все задачи упали), `/api/fetch` автоматически повторяет запрос в demo-режиме.
+
+## Режимы в интерфейсе
+
+| Режим | Что делает | Эндпоинт |
+|---|---|---|
+| **Поток (as_completed)** | Карточки появляются по мере готовности каждой задачи — SSE-стрим событий | `GET /api/stream?mode=stream` |
+| **gather** | Ждём все задачи, один ответ + метрики | `GET /api/fetch` |
+| **Таймаут** | `asyncio.wait(timeout=…)` + отмена зависших задач | `GET /api/stream?mode=timeout` |
+| **Sync (блокирующий)** | Последовательные блокирующие загрузки — базовая линия | `GET /api/stream?mode=sync` |
+| **Sync vs Async** | Один и тот же набор качается дважды, таблица сравнения | `GET /api/compare` |
+
+Настройки: тип медиа (гифки / видео / микс), количество (2–8), степень
+параллелизма (`asyncio.Semaphore`, 1–8), таймаут (1–15 с).
+
+## Соответствие CLI-коду
+
+| CLI-демо | Здесь |
+|---|---|
+| `run_sync_demo` / `time.sleep` | Режим «Sync» → `/api/stream?mode=sync` |
+| `run_async_gather_demo` / `asyncio.gather` | Режим «gather» → `/api/fetch` |
+| `run_async_streaming_demo` / `asyncio.as_completed` | Режим «Поток» → `/api/stream?mode=stream` (SSE) |
+| `run_timeout_demo` / `asyncio.wait` + cancel | Режим «Таймаут» → `/api/stream?mode=timeout` |
+| `print_comparison` | Режим «Sync vs Async» → `/api/compare` |
+| `print_metrics` / `DemoResult` | Панель «Метрики» (mode, completed, elapsed, sequential estimate, time saved, throughput, bytes) |
+| Логи `Start …` / `Done …` / `Result received …` | Панель «Консоль» (те же строки, событие за событием) |
 
 ## API
 
-| Method | Path | Description |
-| --- | --- | --- |
-| GET | `/` | single-page UI |
-| GET | `/api/media` | media catalog |
-| POST | `/api/run` | body: `{"mode": "sync|gather|stream|timeout", "media": ["typing-cat", ...], "timeoutMs": 2500}` → NDJSON event stream |
-| GET | `/api/history` | last 15 runs from SQLite |
-| GET | `/api/health` | liveness probe |
+- `GET /` — страница.
+- `GET /api/health` — `{"ok": true, "mode": "real|sim", "ffmpeg": bool}`.
+- `GET /api/library` — библиотека источников + режим.
+- `GET /api/fetch?kind=gif|video|mix&count=N&concurrency=M` — режим gather,
+  JSON: `{req_id, items[], metrics, fallback_simulated}`.
+- `GET /api/stream?mode=stream|sync|timeout&kind=…&count=…&timeout=T` — SSE,
+  события: `start`, `log`, `item`, `cancelled`, `fail`, `timeout_info`, `metrics`.
+- `GET /api/compare?kind=…&count=…` — sync vs async, JSON: `{sync, async}`.
+- `GET /media/<req_id>/<item_id>[?download=1]` — отдача скачанных байтов
+  (в памяти, TTL 20 мин, лимит 250 МБ).
 
-### Event stream protocol (NDJSON, one JSON object per line)
+Пример:
 
-```
-{"type": "run-start",  "mode": "gather", "totalTasks": 6, "sequentialMs": 8200, "tasks": [...], "t": 0}
-{"type": "task-start", "key": "typing-cat", "name": "Typing Cat", "delayMs": 1300, "t": 1}
-{"type": "task-done",  "key": "typing-cat", "url": "...", "startedAt": 0, "t": 1302}
-{"type": "task-cancel","key": "bbb-full", "name": "Big Buck Bunny: Full Movie", "t": 2501}
-{"type": "metrics",    "elapsedMs": 3003, "completed": 6, "savedMs": 5197, "throughput": 2.0, "runId": 5}
-{"type": "end",        "t": 3004}
+```bash
+curl -N "http://127.0.0.1:5000/api/stream?kind=video&count=4&mode=timeout&timeout=3"
 ```
 
-Cancelling from the client (Stop button) aborts the fetch; the server-side
-generator's `finally` block cancels all pending asyncio tasks, so nothing leaks.
+## Как устроен код
 
-## What to try
+```
+flask-async-media/
+├── app.py               # Flask-роуты: страницы, /api/*, SSE-генератор, /media
+├── media.py             # библиотека источников, async/sync загрузка, метрики, заглушки
+├── templates/index.html # UI ( controls, консоль, карточки, метрики)
+├── static/css/style.css # тёмная тема
+├── static/js/app.js     # EventSource, карточки, таблицы метрик
+└── requirements.txt
+```
 
-1. Select all **GIFs** → **Sequential** → run: watch them appear strictly one by one (~8.2s).
-2. Same selection → **Gather** → run: everything lands at once after ~3.0s (the max delay).
-3. Same selection → **Streaming** → run: results pop in as each task finishes.
-4. Select the **heavy videos**, set the timeout slider to ~1.5s → **Timeout** → run:
-   only the fast ones survive, the rest are cancelled at the limit.
-5. Compare the metrics cards, the session comparison table and the SQLite history below.
+Ключевые приёмы:
+
+- Асинхронные view Flask (`async def` + `flask[async]`, под капотом asgiref).
+- Для SSE — синхронный генератор ответа, внутри которого на каждый запрос
+  создаётся свой event loop; задачи гоняются через `asyncio.as_completed`
+  или `asyncio.wait`, а готовые результаты уходят клиенту через `asyncio.Queue`.
+- `asyncio.Semaphore` ограничивает параллелизм; тайминги считаются после входа
+  в семафор, чтобы «последовательная оценка» была честной.
+- Скачанные байты кэшируются в памяти и раздаются отдельным эндпоинтом.
+
+## Ограничения и прод-советы
+
+- Это демо: скачанные файлы хранятся в памяти процесса, dev-сервер Werkzeug
+  однопоточен на запрос. Для продакшена — gunicorn с воркерами/тредами,
+  вынос хранилища в Redis/S3, а для настоящего push — ASGI (FastAPI/Starlette).
+- В режиме Sync vs Async файлы скачиваются дважды (sync-проход + async-проход),
+  поэтому сравнение ограничено 4 элементами.

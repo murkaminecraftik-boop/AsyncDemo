@@ -1,639 +1,260 @@
-/* ============================================================
-   Async Media Lab — client logic
-   Reads the NDJSON event stream from POST /api/run and renders:
-   live console, delivered media, metrics, comparison, history.
-   ============================================================ */
+/* Async Media Fetcher — клиентская логика: SSE-поток, gather, сравнение */
+"use strict";
 
-(function () {
-  "use strict";
+const $ = (s) => document.querySelector(s);
+const $$ = (s) => [...document.querySelectorAll(s)];
 
-  // ---------- helpers ----------
-  const $ = (id) => document.getElementById(id);
+const state = { es: null, abort: null, running: false };
 
-  const consoleEl = $("console");
-  const galleryEl = $("gallery");
-  const galleryEmpty = $("gallery-empty");
-  const metricsCards = $("metrics-cards");
-  const comparisonBody = $("comparison-body");
-  const historyBody = $("history-body");
-  const runBtn = $("run-btn");
-  const stopBtn = $("stop-btn");
-  const progressBar = $("progress-bar");
-  const progressEl = $("progress");
-  const progressLabel = $("progress-label");
-  const selCount = $("sel-count");
-  const selEstimate = $("sel-estimate");
-  const timeoutRow = $("timeout-row");
-  const timeoutRange = $("timeout-range");
-  const timeoutValue = $("timeout-value");
-  const galleryHint = $("gallery-hint");
-  const stampEl = $("status-stamp");
+/* ---------- утилиты ---------- */
 
-  const MODE_LABELS = {
-    sync: "Sequential",
-    gather: "Gather",
-    stream: "Streaming",
-    timeout: "Timeout",
+const fmtSecs = (v) => `${Number(v).toFixed(2)} с`;
+const fmtMB = (b) => `${(b / 1e6).toFixed(1)} МБ`;
+
+function log(kind, msg) {
+  const box = $("#console");
+  const line = document.createElement("div");
+  line.className = "log-line " + (kind || "");
+  line.textContent = msg;
+  box.appendChild(line);
+  box.scrollTop = box.scrollHeight;
+}
+
+function params() {
+  return new URLSearchParams({
+    kind: $('input[name="kind"]:checked').value,
+    count: $("#count").value,
+    concurrency: $("#concurrency").value,
+    timeout: $("#timeout").value,
+  });
+}
+
+function setRunning(v) {
+  state.running = v;
+  $("#run").disabled = v;
+  $("#stop").disabled = !v;
+}
+
+function resetUI() {
+  $("#console").innerHTML = "";
+  $("#cards").innerHTML = "";
+  $("#metrics-wrap").hidden = true;
+  $("#compare-wrap").hidden = true;
+  $("#timeout-banner").hidden = true;
+}
+
+/* ---------- карточки ---------- */
+
+function skeletons(items) {
+  $("#cards").innerHTML = items.map((it) => `
+    <article class="card pending" id="card-${it.item_id}">
+      <div class="card-media"><div class="spinner"></div></div>
+      <div class="card-body">
+        <h3>${it.title}</h3>
+        <div class="meta">
+          <span class="chip ${it.kind}">${it.kind === "gif" ? "гифка" : "видео"}</span>
+          ${it.size_hint_mb ? `<span>~${Number(it.size_hint_mb).toFixed(1)} МБ</span>` : ""}
+          ${it.sim_delay ? `<span>planned ${Number(it.sim_delay).toFixed(1)}s</span>` : ""}
+        </div>
+        <div class="status">ожидание…</div>
+      </div>
+    </article>`).join("");
+}
+
+function fillCard(r) {
+  const card = document.getElementById("card-" + r.item_id);
+  if (!card) return;
+  card.classList.remove("pending");
+  const box = card.querySelector(".card-media");
+  const status = card.querySelector(".status");
+  if (r.ok && r.media_url) {
+    const ctype = r.content_type || "";
+    if (ctype.startsWith("image/")) {
+      box.innerHTML = `<img src="${r.media_url}" alt="${r.title}">`;
+    } else if (ctype.startsWith("video/")) {
+      box.innerHTML = `<video controls preload="metadata" src="${r.media_url}"></video>`;
+    } else {
+      box.innerHTML = `<div class="no-preview">нет превью</div>`;
+    }
+    card.classList.add("done");
+    status.innerHTML =
+      `готово за ${fmtSecs(r.elapsed)} · ${fmtMB(r.size_bytes)}` +
+      ` · <a href="${r.media_url}?download=1">скачать</a>`;
+  } else {
+    card.classList.add("fail");
+    box.innerHTML = `<div class="no-preview">ошибка</div>`;
+    status.textContent = r.error || "ошибка загрузки";
+  }
+}
+
+function markCancelled(d) {
+  const card = document.getElementById("card-" + d.item_id);
+  if (!card) return;
+  card.classList.remove("pending");
+  card.classList.add("cancelled");
+  card.querySelector(".card-media").innerHTML = `<div class="no-preview">⏱ отменено</div>`;
+  card.querySelector(".status").textContent = "отменено по таймауту";
+}
+
+function markError(d) {
+  const card = document.getElementById("card-" + d.item_id);
+  if (!card) return;
+  card.classList.remove("pending");
+  card.classList.add("fail");
+  card.querySelector(".card-media").innerHTML = `<div class="no-preview">ошибка</div>`;
+  card.querySelector(".status").textContent = d.message || "ошибка";
+}
+
+/* ---------- метрики ---------- */
+
+function renderMetrics(m) {
+  $("#metrics-wrap").hidden = false;
+  $("#metrics-body").innerHTML = `
+    <tr><td>Режим</td><td>${m.mode}${m.simulated ? " · демо-данные" : ""}</td></tr>
+    <tr><td>Выполнено</td><td>${m.completed} из ${m.total}${m.cancelled ? ` · отменено ${m.cancelled}` : ""}</td></tr>
+    <tr><td>Общее время</td><td>${fmtSecs(m.elapsed)}</td></tr>
+    <tr><td>Последовательная оценка</td><td>${fmtSecs(m.sequential_estimate)}</td></tr>
+    <tr><td>Сэкономлено versus последовательный</td><td class="good">${fmtSecs(m.time_saved)}</td></tr>
+    <tr><td>Пропускная способность</td><td>${m.throughput.toFixed(2)} задач/с</td></tr>
+    <tr><td>Получено байт</td><td>${fmtMB(m.bytes_received)}</td></tr>`;
+  log("info", `Metrics: ${m.mode} | ${m.completed}/${m.total} | ` +
+      `elapsed ${m.elapsed.toFixed(2)}s | saved ${m.time_saved.toFixed(2)}s | ` +
+      `throughput ${m.throughput.toFixed(2)}`);
+}
+
+function renderCompare(d) {
+  const wrap = $("#compare-wrap");
+  wrap.hidden = false;
+  const a = d.async.metrics, s = d.sync.metrics;
+  const speedup = s.elapsed > 0 ? (s.elapsed / Math.max(a.elapsed, 1e-6)).toFixed(1) : "—";
+  const rows = [
+    ["Режим", s.mode, a.mode, ""],
+    ["Выполнено", `${s.completed}/${s.total}`, `${a.completed}/${a.total}`, ""],
+    ["Общее время", fmtSecs(s.elapsed), fmtSecs(a.elapsed), `×${speedup} быстрее`],
+    ["Последовательная оценка", fmtSecs(s.sequential_estimate), fmtSecs(a.sequential_estimate), ""],
+    ["Пропускная способность", `${s.throughput.toFixed(2)}`, `${a.throughput.toFixed(2)}`, "задач/с"],
+    ["Получено байт", fmtMB(s.bytes_received), fmtMB(a.bytes_received), ""],
+  ];
+  $("#compare-body").innerHTML = rows.map((r) =>
+    `<tr><td>${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td><td class="good">${r[3]}</td></tr>`).join("");
+  skeletons(d.async.items.map((r) => ({
+    item_id: r.item_id, title: r.title, kind: r.kind, size_hint_mb: 0, sim_delay: 0,
+  })));
+  d.async.items.forEach(fillCard);
+}
+
+/* ---------- запуск режимов ---------- */
+
+function runStream(mode) {
+  const p = params();
+  p.set("mode", mode);
+  const es = new EventSource("/api/stream?" + p.toString());
+  state.es = es;
+
+  es.addEventListener("start", (e) => {
+    const d = JSON.parse(e.data);
+    log("info", `режим: ${d.mode} · ${d.simulated ? "демо-данные" : "реальные загрузки"} · всего ${d.total}`);
+    skeletons(d.items);
+  });
+  es.addEventListener("log", (e) => log("", JSON.parse(e.data).msg));
+  es.addEventListener("item", (e) => {
+    const d = JSON.parse(e.data);
+    fillCard(d);
+    log("ok", `Done ${d.title} | actual wait ${Number(d.elapsed).toFixed(2)}s | ${fmtMB(d.size_bytes)}`);
+  });
+  es.addEventListener("fail", (e) => {
+    const d = JSON.parse(e.data);
+    markError(d);
+    log("err", `Ошибка: ${d.title} — ${d.message}`);
+  });
+  es.addEventListener("cancelled", (e) => {
+    const d = JSON.parse(e.data);
+    markCancelled(d);
+    log("warn", `Cancelled ${d.title}`);
+  });
+  es.addEventListener("timeout_info", (e) => {
+    const d = JSON.parse(e.data);
+    const b = $("#timeout-banner");
+    b.hidden = false;
+    b.textContent = `Таймаут ${d.timeout} с: выполнено до дедлайна ${d.completed}, ` +
+      `отменено после ${d.cancelled}`;
+  });
+  es.addEventListener("metrics", (e) => {
+    renderMetrics(JSON.parse(e.data));
+    log("ok", "Готово.");
+    es.close();
+    setRunning(false);
+  });
+  es.onerror = () => {
+    if (!state.running) return;
+    log("err", "Соединение закрыто сервером");
+    es.close();
+    setRunning(false);
   };
+  setRunning(true);
+}
 
-  const state = {
-    running: false,
-    controller: null,
-    totalTasks: 0,
-    settledTasks: 0,
-    mode: "gather",
-    bufferingGather: false,
-    gatherBuffer: [],
-    sessionRuns: [],
-    taskStarts: {},   // key -> { name, t }
-    taskEnds: {},     // key -> { t, ok }
-    cancelledCount: 0,
-    ganttDrawn: false,
-  };
-
-  function fmtS(ms) {
-    return (ms / 1000).toFixed(2) + "s";
+async function runGather() {
+  setRunning(true);
+  const ctl = new AbortController();
+  state.abort = ctl;
+  try {
+    log("info", "await asyncio.gather(…) — ждём ВСЕ задачи, потом один ответ…");
+    const resp = await fetch("/api/fetch?" + params().toString(), { signal: ctl.signal });
+    const d = await resp.json();
+    if (d.fallback_simulated) log("warn", "Сеть недоступна — автоматически перешли в демо-режим");
+    skeletons(d.items.map((r) => ({
+      item_id: r.item_id, title: r.title, kind: r.kind, size_hint_mb: 0, sim_delay: 0,
+    })));
+    d.items.forEach(fillCard);
+    renderMetrics(d.metrics);
+    log("ok", `Готово: ${d.metrics.completed}/${d.metrics.total} за ${fmtSecs(d.metrics.elapsed)}`);
+  } catch (err) {
+    if (err.name !== "AbortError") log("err", String(err));
   }
+  setRunning(false);
+}
 
-  // ---------- status stamp (section C) ----------
-  function setStamp(text, stateName) {
-    if (!stampEl) return;
-    stampEl.textContent = text;
-    stampEl.dataset.state = stateName;
+async function runCompare() {
+  setRunning(true);
+  const ctl = new AbortController();
+  state.abort = ctl;
+  try {
+    log("info", "Sync vs Async: сначала качаем по очереди, затем параллельно (это долго)…");
+    const resp = await fetch("/api/compare?" + params().toString(), { signal: ctl.signal });
+    const d = await resp.json();
+    log("ok", `Sync: ${d.sync.metrics.elapsed.toFixed(2)}s | Async: ${d.async.metrics.elapsed.toFixed(2)}s`);
+    renderCompare(d);
+  } catch (err) {
+    if (err.name !== "AbortError") log("err", String(err));
   }
+  setRunning(false);
+}
 
-  // ---------- ascii task timeline, printed after a run ----------
-  function renderGantt() {
-    if (state.ganttDrawn) return;
-    const keys = Object.keys(state.taskStarts);
-    if (!keys.length) return;
-    state.ganttDrawn = true;
+/* ---------- события контролов ---------- */
 
-    let last = 0;
-    keys.forEach((k) => {
-      const e = state.taskEnds[k];
-      if (e && e.t > last) last = e.t;
-    });
-    if (!last) last = 1;
+$("#run").addEventListener("click", () => {
+  const mode = $('input[name="mode"]:checked').value;
+  resetUI();
+  if (mode === "gather") runGather();
+  else if (mode === "compare") runCompare();
+  else runStream(mode);
+});
 
-    logLine("task timeline, to scale", "console-header", null);
-    const WIDTH = 30;
-    keys.forEach((k) => {
-      const s = state.taskStarts[k];
-      const e = state.taskEnds[k];
-      const start = Math.min(s.t, last);
-      const end = e ? Math.min(e.t, last) : last;
-      const a = Math.round((start / last) * WIDTH);
-      const b = Math.round((end / last) * WIDTH);
-      const fill = Math.max(b - a, 1);
-      const bar =
-        "·".repeat(a) +
-        "█".repeat(fill) +
-        "·".repeat(Math.max(WIDTH - b, 0));
-      const dur = e ? ((end - start) / 1000).toFixed(2) + "s" : "—";
-      const mark = e ? (e.ok ? "" : "  × cancelled") : "  — not settled";
-      const cls = e && !e.ok ? "console-cancel" : "console-gantt";
-      logLine(
-        s.name.slice(0, 22).padEnd(22) + bar + " " + dur.padStart(6) + mark,
-        cls,
-        null
-      );
-    });
-  }
+$("#stop").addEventListener("click", () => {
+  if (state.es) state.es.close();
+  if (state.abort) state.abort.abort();
+  setRunning(false);
+  log("warn", "Остановлено пользователем");
+});
 
-  // ---------- console ----------
-  function logLine(text, cls, t) {
-    if (consoleEl.querySelector(".console-hint")) {
-      consoleEl.innerHTML = "";
-    }
-    const line = document.createElement("div");
-    line.className = "console-line" + (cls ? " " + cls : "");
-    const ts = document.createElement("span");
-    ts.className = "ts";
-    ts.textContent = t != null ? "[" + (t / 1000).toFixed(2) + "s]" : "[----]";
-    line.appendChild(ts);
-    line.appendChild(document.createTextNode(text));
-    consoleEl.appendChild(line);
-    while (consoleEl.children.length > 400) {
-      consoleEl.removeChild(consoleEl.firstChild);
-    }
-    consoleEl.scrollTop = consoleEl.scrollHeight;
-  }
+$$('input[name="mode"]').forEach((r) => r.addEventListener("change", () => {
+  $("#timeout-row").hidden = $('input[name="mode"]:checked').value !== "timeout";
+}));
 
-  $("console-clear").addEventListener("click", () => {
-    consoleEl.innerHTML = "";
-    logLine("console cleared", "console-hint");
-  });
-
-  // ---------- catalog selection ----------
-  const cards = Array.from(document.querySelectorAll(".media-card"));
-  const checks = cards.map((c) => c.querySelector(".media-check"));
-
-  checks.forEach((chk) => chk.addEventListener("change", updateSelectionSummary));
-
-  function selectedKeys() {
-    return checks.filter((c) => c.checked).map((c) => c.value);
-  }
-
-  function updateSelectionSummary() {
-    const sel = checks.filter((c) => c.checked);
-    selCount.textContent = String(sel.length);
-    const totalDelay = sel.reduce((sum, c) => {
-      const card = c.closest(".media-card");
-      return sum + Number(card.dataset.delay);
-    }, 0);
-    selEstimate.textContent = (totalDelay / 1000).toFixed(1) + "s";
-  }
-
-  function selectByKind(kind) {
-    checks.forEach((c) => {
-      const card = c.closest(".media-card");
-      c.checked = kind ? card.dataset.kind === kind : true;
-    });
-    updateSelectionSummary();
-  }
-
-  $("select-gifs").addEventListener("click", () => selectByKind("gif"));
-  $("select-videos").addEventListener("click", () => selectByKind("video"));
-  $("select-all").addEventListener("click", () => selectByKind(null));
-  $("select-none").addEventListener("click", () => {
-    checks.forEach((c) => (c.checked = false));
-    updateSelectionSummary();
-  });
-
-  updateSelectionSummary();
-
-  // ---------- mode + timeout ----------
-  const modeRadios = Array.from(document.querySelectorAll('input[name="mode"]'));
-
-  modeRadios.forEach((r) =>
-    r.addEventListener("change", () => {
-      state.mode = r.value;
-      timeoutRow.hidden = state.mode !== "timeout";
-    })
-  );
-
-  timeoutRange.addEventListener("input", () => {
-    timeoutValue.textContent = (Number(timeoutRange.value) / 1000).toFixed(1) + "s";
-  });
-
-  function currentMode() {
-    const checked = modeRadios.find((r) => r.checked);
-    return checked ? checked.value : "gather";
-  }
-
-  // ---------- progress ----------
-  function setProgress(done, total, label) {
-    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-    progressBar.style.width = pct + "%";
-    progressEl.setAttribute("aria-valuenow", String(pct));
-    progressLabel.textContent = label != null ? label : pct + "%";
-  }
-
-  function setRunningUI(running) {
-    state.running = running;
-    runBtn.disabled = running;
-    stopBtn.disabled = !running;
-  }
-
-  // ---------- gallery ----------
-  function clearGalleryIfFirst() {
-    if (galleryEmpty && galleryEmpty.parentNode) {
-      galleryEmpty.parentNode.removeChild(galleryEmpty);
-    }
-  }
-
-  function mediaNode(ev) {
-    if (ev.kind === "gif") {
-      const img = document.createElement("img");
-      img.src = ev.url;
-      img.alt = ev.name + " (animated GIF)";
-      img.loading = "lazy";
-      return img;
-    }
-    const video = document.createElement("video");
-    video.src = ev.url;
-    video.controls = true;
-    video.preload = "metadata";
-    video.muted = true;
-    video.setAttribute("aria-label", ev.name + " (video)");
-    return video;
-  }
-
-  function addResultCard(ev, burstIndex) {
-    clearGalleryIfFirst();
-    const card = document.createElement("article");
-    card.className = "result-card" + (burstIndex != null ? " gather-burst" : "");
-    if (burstIndex != null) card.style.setProperty("--i", String(burstIndex));
-
-    const media = document.createElement("div");
-    media.className = "result-media";
-    media.appendChild(mediaNode(ev));
-
-    const info = document.createElement("div");
-    info.className = "result-info";
-
-    const name = document.createElement("span");
-    name.className = "result-name";
-    name.textContent = ev.name;
-
-    const meta = document.createElement("span");
-    meta.className = "result-meta";
-    const wait = document.createElement("span");
-    wait.textContent = "wait " + fmtS(ev.delayMs);
-    const actual = document.createElement("span");
-    actual.className = "ok";
-    actual.textContent = "done " + fmtS(ev.t - ev.startedAt);
-    const size = document.createElement("span");
-    size.textContent = Number(ev.sizeMb).toFixed(1) + " MB";
-    meta.appendChild(wait);
-    meta.appendChild(actual);
-    meta.appendChild(size);
-
-    info.appendChild(name);
-    info.appendChild(meta);
-    card.appendChild(media);
-    card.appendChild(info);
-    galleryEl.appendChild(card);
-  }
-
-  function addCancelledCard(ev) {
-    clearGalleryIfFirst();
-    const card = document.createElement("article");
-    card.className = "result-card is-cancelled";
-
-    const media = document.createElement("div");
-    media.className = "result-media";
-    media.textContent = "× cancelled at " + fmtS(ev.t);
-
-    const info = document.createElement("div");
-    info.className = "result-info";
-    const name = document.createElement("span");
-    name.className = "result-name";
-    name.textContent = ev.name;
-    const meta = document.createElement("span");
-    meta.className = "result-meta";
-    const cancel = document.createElement("span");
-    cancel.className = "cancel";
-    cancel.textContent = "aborted";
-    const wait = document.createElement("span");
-    wait.textContent = "needed " + fmtS(ev.delayMs);
-    meta.appendChild(cancel);
-    meta.appendChild(wait);
-    info.appendChild(name);
-    info.appendChild(meta);
-    card.appendChild(media);
-    card.appendChild(info);
-    galleryEl.appendChild(card);
-  }
-
-  function flushGatherBuffer() {
-    state.gatherBuffer.forEach((ev, i) => addResultCard(ev, i));
-    state.gatherBuffer = [];
-    state.bufferingGather = false;
-  }
-
-  // ---------- metrics + comparison ----------
-  function renderMetrics(m) {
-    const savedCls = m.savedMs > 200 ? "good" : m.savedMs >= -200 ? "warn" : "bad";
-    const cards = [
-      { label: "runtime", value: fmtS(m.elapsedMs), cls: "neutral" },
-      { label: "completed", value: m.completed + "/" + m.totalTasks, cls: "good" },
-      { label: "cancelled", value: String(m.cancelled), cls: m.cancelled > 0 ? "bad" : "neutral" },
-      {
-        label: "saved vs sequential",
-        value: (m.savedMs <= 0 ? "" : "+") + fmtS(m.savedMs),
-        cls: savedCls,
-      },
-      { label: "throughput", value: m.throughput.toFixed(2) + "/s", cls: "good" },
-      { label: "sequential est.", value: fmtS(m.sequentialMs), cls: "warn" },
-    ];
-    metricsCards.innerHTML = "";
-    cards.forEach((c) => {
-      const el = document.createElement("div");
-      el.className = "metric-card";
-      const l = document.createElement("div");
-      l.className = "metric-label";
-      l.textContent = c.label;
-      const v = document.createElement("div");
-      v.className = "metric-value " + c.cls;
-      v.textContent = c.value;
-      el.appendChild(l);
-      el.appendChild(v);
-      metricsCards.appendChild(el);
-    });
-  }
-
-  function addComparisonRow(m) {
-    state.sessionRuns.push(Object.assign({ mode: state.mode }, m));
-    comparisonBody.innerHTML = "";
-    state.sessionRuns
-      .slice()
-      .reverse()
-      .forEach((r) => {
-        const tr = document.createElement("tr");
-        const saved = r.savedMs;
-        tr.innerHTML =
-          "<td><span class='mode-tag " +
-          r.mode +
-          "'>" +
-          (MODE_LABELS[r.mode] || r.mode) +
-          "</span></td>" +
-          "<td>" +
-          r.completed +
-          "/" +
-          r.totalTasks +
-          (r.cancelled ? " <span class='saved-neg'>(-" + r.cancelled + ")</span>" : "") +
-          "</td>" +
-          "<td>" +
-          fmtS(r.elapsedMs) +
-          "</td>" +
-          "<td>" +
-          fmtS(r.sequentialMs) +
-          "</td>" +
-          "<td class='" +
-          (saved > 0 ? "saved-pos" : "saved-neg") +
-          "'>" +
-          (saved > 0 ? "+" : "") +
-          fmtS(saved) +
-          "</td>" +
-          "<td>" +
-          r.throughput.toFixed(2) +
-          " tasks/s</td>";
-        comparisonBody.appendChild(tr);
-      });
-  }
-
-  // ---------- history ----------
-  function esc(s) {
-    return String(s).replace(/[&<>"]/g, (ch) => ({
-      "&": "&amp;",
-      "<": "&lt;",
-      ">": "&gt;",
-      '"': "&quot;",
-    })[ch]);
-  }
-
-  async function refreshHistory() {
-    try {
-      const res = await fetch("/api/history");
-      const data = await res.json();
-      const runs = data.runs || [];
-      historyBody.innerHTML = "";
-      if (!runs.length) {
-        historyBody.innerHTML =
-          "<tr class='empty-row'><td colspan='7'>No runs stored yet.</td></tr>";
-        return;
-      }
-      runs.forEach((r) => {
-        const saved = r.sequential_ms - r.elapsed_ms;
-        const tr = document.createElement("tr");
-        tr.innerHTML =
-          "<td>" +
-          r.id +
-          "</td>" +
-          "<td>" +
-          esc(r.created_at) +
-          "</td>" +
-          "<td><span class='mode-tag " +
-          esc(r.mode) +
-          "'>" +
-          (MODE_LABELS[r.mode] || esc(r.mode)) +
-          "</span></td>" +
-          "<td>" +
-          r.completed +
-          "/" +
-          r.total_tasks +
-          (r.cancelled ? " <span class='saved-neg'>(-" + r.cancelled + ")</span>" : "") +
-          "</td>" +
-          "<td>" +
-          fmtS(r.elapsed_ms) +
-          "</td>" +
-          "<td class='" +
-          (saved > 0 ? "saved-pos" : "saved-neg") +
-          "'>" +
-          (saved > 0 ? "+" : "") +
-          fmtS(saved) +
-          "</td>" +
-          "<td>" +
-          Number(r.throughput).toFixed(2) +
-          " tasks/s</td>";
-        historyBody.appendChild(tr);
-      });
-    } catch (err) {
-      historyBody.innerHTML =
-        "<tr class='empty-row'><td colspan='7'>Failed to load history.</td></tr>";
-    }
-  }
-
-  $("history-refresh").addEventListener("click", refreshHistory);
-
-  // ---------- event dispatch ----------
-  function handleEvent(ev) {
-    switch (ev.type) {
-      case "run-start":
-        state.totalTasks = ev.totalTasks;
-        state.settledTasks = 0;
-        state.mode = ev.mode;
-        state.bufferingGather = ev.mode === "gather";
-        state.gatherBuffer = [];
-        state.taskStarts = {};
-        state.taskEnds = {};
-        state.cancelledCount = 0;
-        state.ganttDrawn = false;
-        galleryHint.textContent =
-          ev.mode === "gather"
-            ? "gather — delivery happens all at once, at the end"
-            : "delivery order: as completed by the engine";
-        setProgress(0, ev.totalTasks, "0 of " + ev.totalTasks + " tasks");
-        setStamp("PROCESSING", "running");
-        logLine("Requisition accepted — " + ev.title, "console-header", ev.t);
-        break;
-
-      case "task-start":
-        state.taskStarts[ev.key] = { name: ev.name, t: ev.t };
-        logLine("Start " + ev.name + " | planned wait " + fmtS(ev.delayMs), "console-start", ev.t);
-        break;
-
-      case "task-done": {
-        state.taskEnds[ev.key] = { t: ev.t, ok: true };
-        logLine(
-          "Done " +
-            ev.name +
-            " | planned wait " +
-            fmtS(ev.delayMs) +
-            " | actual wait " +
-            fmtS(ev.t - ev.startedAt),
-          "console-done",
-          ev.t
-        );
-        if (state.bufferingGather) {
-          state.gatherBuffer.push(ev);
-        } else {
-          addResultCard(ev, null);
-        }
-        state.settledTasks += 1;
-        setProgress(
-          state.settledTasks,
-          state.totalTasks,
-          state.settledTasks + " of " + state.totalTasks + " tasks"
-        );
-        break;
-      }
-
-      case "task-cancel":
-        state.taskEnds[ev.key] = { t: ev.t, ok: false };
-        state.cancelledCount += 1;
-        logLine("Cancelled " + ev.name + " (timeout limit reached)", "console-cancel", ev.t);
-        addCancelledCard(ev);
-        state.settledTasks += 1;
-        setProgress(
-          state.settledTasks,
-          state.totalTasks,
-          state.settledTasks + " of " + state.totalTasks + " tasks"
-        );
-        break;
-
-      case "log":
-        logLine(ev.message, null, ev.t);
-        break;
-
-      case "metrics":
-        logLine("Metrics", "console-header", ev.t);
-        logLine(
-          "| completed tasks | " + ev.completed + " of " + ev.totalTasks + " |",
-          "console-metric",
-          ev.t
-        );
-        logLine("| total runtime | " + fmtS(ev.elapsedMs) + " |", "console-metric", ev.t);
-        logLine(
-          "| sequential wait estimate | " + fmtS(ev.sequentialMs) + " |",
-          "console-metric",
-          ev.t
-        );
-        logLine(
-          "| time saved versus sequential | " +
-            (ev.savedMs > 0 ? "+" : "") +
-            fmtS(ev.savedMs) +
-            " |",
-          "console-metric",
-          ev.t
-        );
-        logLine("| throughput | " + ev.throughput.toFixed(2) + " tasks per second |", "console-metric", ev.t);
-        renderMetrics(ev);
-        addComparisonRow(ev);
-        if (state.bufferingGather) flushGatherBuffer();
-        break;
-
-      case "end":
-        setProgress(state.totalTasks, state.totalTasks, "finished");
-        setStamp(state.cancelledCount > 0 ? "PARTIAL" : "COMPLETE", state.cancelledCount > 0 ? "aborted" : "done");
-        renderGantt();
-        break;
-
-      case "error":
-        logLine("ERROR: " + ev.message, "console-error", ev.t);
-        break;
-
-      default:
-        break;
-    }
-  }
-
-  // ---------- run ----------
-  async function runDemo() {
-    if (state.running) return;
-    const keys = selectedKeys();
-    if (!keys.length) {
-      logLine("requisition rejected: tick at least one item in section A first", "console-error");
-      return;
-    }
-
-    const mode = currentMode();
-    const body = { mode, media: keys };
-    if (mode === "timeout") body.timeoutMs = Number(timeoutRange.value);
-
-    galleryEl.innerHTML = "";
-    metricsCards.innerHTML = "<p class='metrics-empty'>Collecting metrics…</p>";
-    setRunningUI(true);
-    setProgress(0, keys.length, "starting…");
-    logLine("$ POST /api/run → mode=" + mode + ", tasks=" + keys.length, "console-hint");
-
-    state.controller = new AbortController();
-
-    try {
-      const res = await fetch("/api/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-        signal: state.controller.signal,
-      });
-
-      if (!res.ok) {
-        let msg = "HTTP " + res.status;
-        try {
-          const err = await res.json();
-          if (err && err.error) msg = err.error;
-        } catch (e) {
-          /* keep default */
-        }
-        throw new Error(msg);
-      }
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = "";
-
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        const lines = buf.split("\n");
-        buf = lines.pop();
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          try {
-            handleEvent(JSON.parse(trimmed));
-          } catch (e) {
-            logLine("bad event: " + trimmed.slice(0, 120), "console-error");
-          }
-        }
-      }
-    } catch (err) {
-      if (err && err.name === "AbortError") {
-        logLine("— run aborted by user, server cancelled pending tasks —", "console-cancel");
-        setProgress(state.settledTasks, Math.max(state.totalTasks, 1), "aborted");
-        setStamp("ABORTED", "aborted");
-      } else {
-        logLine("request failed: " + (err && err.message ? err.message : String(err)), "console-error");
-        setStamp("REJECTED", "aborted");
-      }
-    } finally {
-      state.controller = null;
-      state.bufferingGather = false;
-      setRunningUI(false);
-      renderGantt();
-      refreshHistory();
-    }
-  }
-
-  runBtn.addEventListener("click", runDemo);
-
-  stopBtn.addEventListener("click", () => {
-    if (state.controller) state.controller.abort();
-  });
-
-  // ---------- health ----------
-  fetch("/api/health")
-    .then((r) => r.json())
-    .then((d) => {
-      $("health-badge").textContent = d && d.status === "ok" ? "ready" : "degraded";
-    })
-    .catch(() => {
-      $("health-badge").textContent = "no reply";
-    });
-
-  // ---------- init ----------
-  refreshHistory();
-})();
+["count", "concurrency", "timeout"].forEach((id) => {
+  const input = $("#" + id);
+  const out = $("#" + id + "-val");
+  out.textContent = input.value;
+  input.addEventListener("input", () => { out.textContent = input.value; });
+});

@@ -1,258 +1,123 @@
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html lang="ru">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Async Media Requisition — FORM ARM-27B</title>
-  <meta name="description" content="An interoffice requisition form for the asyncio engine: request GIFs and heavy videos, pick an execution mode (sequential, gather, as_completed, timeout), and watch the NDJSON event stream fill the ledger.">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%23f4f1e6'/%3E%3Cpath d='M3.5 8.5l3 3 6-7' stroke='%232b46a8' stroke-width='2.2' fill='none'/%3E%3C/svg%3E">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Async Media — Flask + asyncio</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9A%A1%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
-<div class="sheet">
 
-  <!-- ==================== FORM HEADER ==================== -->
-  <header class="form-head">
-    <div class="form-head-row">
-      <div class="form-id">
-        <h1>Async media requisition</h1>
-        <p class="form-office">Department of Concurrent Requests · media fetching division</p>
-      </div>
-      <div class="form-no">
-        <span class="form-no-main">FORM ARM-27B</span>
-        <span>rev. 2026-10 · supersedes 27-A</span>
-      </div>
+<header class="top">
+  <div class="brand">
+    <span class="logo">⚡</span>
+    <div>
+      <h1>Async Media Fetcher</h1>
+      <p class="sub">Flask + asyncio · попроси гифки или тяжёлые видео — получи их потоком</p>
     </div>
-    <div class="rule-double"></div>
-    <p class="form-instructions">
-      Use this form to requisition animated GIFs and heavy video files from the asyncio engine.
-      Tick the items in section A, choose a processing mode in section B, and submit through
-      section C. The office executes your request with real asyncio and files every event, line
-      by line, into the console in section D. Verbal requests are not accepted.
-    </p>
-    <p class="form-meta">
-      <span>engine status: <b id="health-badge">…</b></span>
-      <span>media on file: 6 gif · 5 video</span>
-      <span>stack: flask · asyncio · ndjson · sqlite</span>
-    </p>
-  </header>
+  </div>
+  <span id="mode-badge" class="badge {{ 'sim' if mode == 'sim' else 'real' }}">
+    {{ 'демо-режим · данные генерируются локально' if mode == 'sim' else 'реальные загрузки из сети' }}
+  </span>
+</header>
 
-  <!-- ==================== A. REQUESTED ITEMS ==================== -->
-  <section class="sec" aria-labelledby="sec-a-title">
-    <h2 class="sec-head" id="sec-a-title">
-      <span class="sec-letter">A</span>
-      <span class="sec-title">Requested items</span>
-      <span class="sec-aside">
-        <button type="button" class="linklike" id="select-gifs">all gifs</button>
-        <button type="button" class="linklike" id="select-videos">all video</button>
-        <button type="button" class="linklike" id="select-all">everything</button>
-        <button type="button" class="linklike" id="select-none">clear</button>
-      </span>
-    </h2>
-
-    <div class="item-table">
-      <div class="item-row item-head">
-        <span></span>
-        <span></span>
-        <span>№ item</span>
-        <span>kind</span>
-        <span class="col-size">size</span>
-        <span>est. wait</span>
-      </div>
-      {% for item in items %}
-      <label class="media-card item-row" data-kind="{{ item.kind }}" data-delay="{{ item.delay_ms }}">
-        <input type="checkbox" class="media-check" value="{{ item.key }}" aria-label="Select {{ item.name }}">
-        <span class="tick" aria-hidden="true"></span>
-        <span class="thumb" aria-hidden="true">
-          {% if item.kind == 'gif' %}
-          <img src="{{ item.url }}" loading="lazy" alt="">
-          {% else %}
-          <video src="{{ item.url }}" preload="metadata" muted></video>
-          {% endif %}
-        </span>
-        <span class="item-name">{{ item.name }}</span>
-        <span class="item-kind">{{ item.kind }}</span>
-        <span class="item-size col-size">{{ '%.1f'|format(item.size_mb) }} MB</span>
-        <span class="item-wait">{{ '%.1f'|format(item.delay_ms / 1000) }}s</span>
-      </label>
-      {% endfor %}
-      <div class="item-row item-total">
-        <span></span>
-        <span></span>
-        <span class="item-total-label">totals — <b id="sel-count">0</b> selected</span>
-        <span></span>
-        <span class="col-size"></span>
-        <span>Σ <b id="sel-estimate">0.0s</b></span>
-      </div>
+<section class="controls panel">
+  <div class="group">
+    <label>Что качать</label>
+    <div class="pills" role="radiogroup" aria-label="Тип медиа">
+      <label class="pill"><input type="radio" name="kind" value="gif" checked><span>Гифки</span></label>
+      <label class="pill"><input type="radio" name="kind" value="video"><span>Видео</span></label>
+      <label class="pill"><input type="radio" name="kind" value="mix"><span>Микс</span></label>
     </div>
-    <p class="fineprint">
-      Est. wait is simulated server-side with asyncio.sleep; file sizes are real. The videos are
-      the heavy freight — in sequential mode they block every request queued behind them.
-    </p>
+  </div>
+
+  <div class="group">
+    <label for="count">Сколько: <output id="count-val">4</output></label>
+    <input type="range" id="count" min="2" max="8" value="4" step="1">
+  </div>
+
+  <div class="group">
+    <label for="concurrency">Параллельно: <output id="concurrency-val">4</output></label>
+    <input type="range" id="concurrency" min="1" max="8" value="4" step="1">
+  </div>
+
+  <div class="group wide">
+    <label>Режим</label>
+    <div class="pills" role="radiogroup" aria-label="Режим">
+      <label class="pill"><input type="radio" name="mode" value="stream" checked><span>Поток (as_completed)</span></label>
+      <label class="pill"><input type="radio" name="mode" value="gather"><span>gather</span></label>
+      <label class="pill"><input type="radio" name="mode" value="timeout"><span>Таймаут</span></label>
+      <label class="pill"><input type="radio" name="mode" value="sync"><span>Sync (блокирующий)</span></label>
+      <label class="pill"><input type="radio" name="mode" value="compare"><span>Sync vs Async</span></label>
+    </div>
+  </div>
+
+  <div class="group" id="timeout-row" hidden>
+    <label for="timeout">Таймаут: <output id="timeout-val">5</output> с</label>
+    <input type="range" id="timeout" min="1" max="15" value="5" step="0.5">
+  </div>
+
+  <div class="group actions">
+    <button id="run" class="btn primary">Загрузить</button>
+    <button id="stop" class="btn ghost" disabled>Стоп</button>
+  </div>
+</section>
+
+<div id="timeout-banner" class="banner" hidden></div>
+
+<main class="grid">
+  <section class="panel console-panel">
+    <h2>Консоль</h2>
+    <div id="console" class="console" aria-live="polite"></div>
   </section>
 
-  <!-- ==================== B. PROCESSING MODE ==================== -->
-  <section class="sec" aria-labelledby="sec-b-title">
-    <h2 class="sec-head" id="sec-b-title">
-      <span class="sec-letter">B</span>
-      <span class="sec-title">Processing mode</span>
-      <span class="sec-aside">check exactly one</span>
-    </h2>
-
-    <div class="mode-list" role="radiogroup" aria-label="Execution mode">
-      <label class="mode-card">
-        <input type="radio" name="mode" value="sync">
-        <span class="mode-box" aria-hidden="true"></span>
-        <span class="mode-key">B1</span>
-        <span class="mode-name">Sequential</span>
-        <code class="mode-prim">time.sleep() in a loop</code>
-        <span class="mode-desc">One request after another, blocking the line. Total ≈ sum of all waits.</span>
-      </label>
-      <label class="mode-card">
-        <input type="radio" name="mode" value="gather" checked>
-        <span class="mode-box" aria-hidden="true"></span>
-        <span class="mode-key">B2</span>
-        <span class="mode-name">Gather</span>
-        <code class="mode-prim">asyncio.gather()</code>
-        <span class="mode-desc">Everything goes out at once and is delivered together, when the last item lands. Total ≈ max wait.</span>
-      </label>
-      <label class="mode-card">
-        <input type="radio" name="mode" value="stream">
-        <span class="mode-box" aria-hidden="true"></span>
-        <span class="mode-key">B3</span>
-        <span class="mode-name">Streaming</span>
-        <code class="mode-prim">asyncio.as_completed()</code>
-        <span class="mode-desc">Delivery order equals completion order; each item is handed over the moment it finishes.</span>
-      </label>
-      <label class="mode-card">
-        <input type="radio" name="mode" value="timeout">
-        <span class="mode-box" aria-hidden="true"></span>
-        <span class="mode-key">B4</span>
-        <span class="mode-name">Timeout</span>
-        <code class="mode-prim">asyncio.wait(timeout=…)</code>
-        <span class="mode-desc">Everything goes out at once; anything still running when the cancellation limit expires is abandoned.</span>
-      </label>
-    </div>
-
-    <div class="timeout-row" id="timeout-row" hidden>
-      <label for="timeout-range">cancellation limit: <b id="timeout-value">2.5s</b></label>
-      <input type="range" id="timeout-range" min="500" max="8000" step="250" value="2500">
-      <div class="range-scale"><span>0.5s</span><span>8.0s</span></div>
+  <section class="panel">
+    <h2>Медиа</h2>
+    <div id="cards" class="cards">
+      <p class="hint">Выберите тип, количество и режим — затем нажмите «Загрузить».
+      В режиме «Поток» карточки будут появляться по мере готовности каждой задачи,
+      как в CLI-демо с <code>asyncio.as_completed</code>.</p>
     </div>
   </section>
+</main>
 
-  <!-- ==================== C. AUTHORIZATION ==================== -->
-  <section class="sec" aria-labelledby="sec-c-title">
-    <h2 class="sec-head" id="sec-c-title">
-      <span class="sec-letter">C</span>
-      <span class="sec-title">Authorization</span>
-      <span class="sec-aside">executed immediately · signature not required</span>
-    </h2>
+<section class="panel" id="metrics-wrap" hidden>
+  <h2>Метрики</h2>
+  <table class="metrics"><tbody id="metrics-body"></tbody></table>
+</section>
 
-    <div class="auth-row">
-      <div class="auth-buttons">
-        <button type="button" class="btn btn-primary" id="run-btn">Submit request</button>
-        <button type="button" class="btn btn-danger" id="stop-btn" disabled>Abort</button>
-      </div>
-      <div class="auth-status">
-        <span class="stamp" id="status-stamp" data-state="idle">IDLE</span>
-        <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progress">
-          <div class="progress-bar" id="progress-bar"></div>
-        </div>
-        <span class="progress-label" id="progress-label">idle — nothing in progress</span>
-      </div>
-    </div>
-  </section>
+<section class="panel" id="compare-wrap" hidden>
+  <h2>Sync vs Async</h2>
+  <p class="hint">Один и тот же набор файлов качается дважды: сначала блокирующе по очереди,
+  затем параллельно через <code>asyncio.gather</code>. Разница во времени — эффект асинхронности.</p>
+  <table class="metrics">
+    <thead><tr><th>Метрика</th><th>Sync</th><th>Async</th><th>Δ</th></tr></thead>
+    <tbody id="compare-body"></tbody>
+  </table>
+</section>
 
-  <!-- ==================== D. ENGINE OUTPUT ==================== -->
-  <section class="sec" aria-labelledby="sec-d-title">
-    <h2 class="sec-head" id="sec-d-title">
-      <span class="sec-letter">D</span>
-      <span class="sec-title">Engine output</span>
-      <span class="sec-aside">
-        <span class="mono-note">ndjson · one event per line</span>
-        <button type="button" class="linklike" id="console-clear">clear</button>
-      </span>
-    </h2>
-    <div class="console" id="console" aria-live="polite" aria-label="Demo event log">
-      <div class="console-line console-hint">$ awaiting request… tick items in section A, choose a mode in section B, submit in section C</div>
-    </div>
-  </section>
+<details class="panel howto">
+  <summary>Как это работает — соответствие вашему CLI-коду</summary>
+  <table class="metrics">
+    <thead><tr><th>CLI-демо</th><th>Здесь</th></tr></thead>
+    <tbody>
+      <tr><td><code>run_sync_demo</code> / <code>time.sleep</code></td><td>Режим «Sync» → <code>/api/stream?mode=sync</code></td></tr>
+      <tr><td><code>run_async_gather_demo</code> / <code>asyncio.gather</code></td><td>Режим «gather» → <code>/api/fetch</code></td></tr>
+      <tr><td><code>run_async_streaming_demo</code> / <code>asyncio.as_completed</code></td><td>Режим «Поток» → <code>/api/stream?mode=stream</code> (SSE)</td></tr>
+      <tr><td><code>run_timeout_demo</code> / <code>asyncio.wait</code> + cancel</td><td>Режим «Таймаут» → <code>/api/stream?mode=timeout</code></td></tr>
+      <tr><td><code>print_comparison</code></td><td>Режим «Sync vs Async» → <code>/api/compare</code></td></tr>
+      <tr><td><code>print_metrics</code> / <code>DemoResult</code></td><td>Панель «Метрики» (тот же набор полей)</td></tr>
+    </tbody>
+  </table>
+</details>
 
-  <!-- ==================== E. DELIVERIES ==================== -->
-  <section class="sec" aria-labelledby="sec-e-title">
-    <h2 class="sec-head" id="sec-e-title">
-      <span class="sec-letter">E</span>
-      <span class="sec-title">Deliveries</span>
-      <span class="sec-aside" id="gallery-hint">nothing delivered yet — results land here during a run</span>
-    </h2>
-    <div class="gallery" id="gallery" aria-live="polite">
-      <div class="gallery-empty" id="gallery-empty">
-        <p>Nothing delivered yet. The ledger fills as the engine hands over files — in streaming
-        mode one line at a time, in gather mode all at once at the very end.</p>
-      </div>
-    </div>
-  </section>
+<footer>
+  Источники: Giphy CDN, test-videos.co.uk (CC), MDN sample (CC0).
+  В демо-режиме файлы генерируются локально (Pillow / ffmpeg).
+  Браузер получает байты через <code>/media/&lt;req_id&gt;/&lt;item_id&gt;</code>.
+</footer>
 
-  <!-- ==================== F. PROCESSING REPORT ==================== -->
-  <section class="sec" aria-labelledby="sec-f-title">
-    <h2 class="sec-head" id="sec-f-title">
-      <span class="sec-letter">F</span>
-      <span class="sec-title">Processing report</span>
-      <span class="sec-aside">typed by the engine upon completion</span>
-    </h2>
-
-    <div class="metrics-cards" id="metrics-cards">
-      <p class="metrics-empty">No report yet — submit a request and the figures appear here.</p>
-    </div>
-
-    <p class="subhead">session comparison — this page load</p>
-    <div class="table-scroll">
-      <table class="data-table" id="comparison-table">
-        <caption class="sr-only">Comparison of demo runs in this session</caption>
-        <thead>
-          <tr><th>mode</th><th>completed</th><th>runtime</th><th>sequential est.</th><th>saved</th><th>throughput</th></tr>
-        </thead>
-        <tbody id="comparison-body">
-          <tr class="empty-row"><td colspan="6">No runs in this session yet.</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </section>
-
-  <!-- ==================== G. ARCHIVE ==================== -->
-  <section class="sec" aria-labelledby="sec-g-title">
-    <h2 class="sec-head" id="sec-g-title">
-      <span class="sec-letter">G</span>
-      <span class="sec-title">Archive</span>
-      <span class="sec-aside">
-        <span class="mono-note">sqlite · data/media_lab.db</span>
-        <button type="button" class="linklike" id="history-refresh">refresh</button>
-      </span>
-    </h2>
-    <div class="table-scroll">
-      <table class="data-table" id="history-table">
-        <caption class="sr-only">Recent runs persisted in the database</caption>
-        <thead>
-          <tr><th>#</th><th>filed at</th><th>mode</th><th>completed</th><th>runtime</th><th>saved</th><th>throughput</th></tr>
-        </thead>
-        <tbody id="history-body">
-          <tr class="empty-row"><td colspan="7">No runs stored yet.</td></tr>
-        </tbody>
-      </table>
-    </div>
-    <p class="fineprint">Every completed run is filed to the local SQLite database and survives
-    restarts — the archive outlives the page.</p>
-  </section>
-
-  <!-- ==================== FOOTER ==================== -->
-  <footer class="form-foot">
-    <div class="rule-double"></div>
-    <p class="foot-main">FORM ARM-27B · retain this portion for your records · aborting a run files no report</p>
-    <p class="foot-sub">flask · python asyncio · ndjson streaming · sqlite — four python files, two static assets, no front-end framework</p>
-  </footer>
-
-</div>
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>
 </html>
