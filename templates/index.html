@@ -9,7 +9,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>async-media-fetcher — Flask + asyncio demo</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230969da'/%3E%3Ctext x='8' y='12' font-family='monospace' font-size='10' fill='%23fff' text-anchor='middle'%3Ea%3C/text%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='2' fill='%23bf5110'/%3E%3Ctext x='8' y='12' font-family='monospace' font-size='10' fill='%23f4f0e6' text-anchor='middle'%3Ea%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
@@ -17,21 +17,21 @@
 
 <header class="site-head">
   <div>
-    <h1>async-media-fetcher</h1>
-    <p class="tagline">Flask + asyncio demo — fetch GIFs or heavyweight videos concurrently, stream results as they finish.</p>
+    <h1>async-media-fetcher<span class="caret" aria-hidden="true"></span></h1>
+    <p class="tagline">Flask + asyncio demo — fetch GIFs or heavyweight videos concurrently, stream each result back the moment it lands.</p>
   </div>
   <span id="mode-badge" class="mode {{ 'sim' if mode == 'sim' else 'real' }}">{{ 'mode: sim (local fixtures)' if mode == 'sim' else 'mode: real (network)' }}</span>
 </header>
 
 <p class="intro">
-  Pick what to download, how many items and how aggressively to parallelize, then press
-  Start. The server fetches every item with asyncio and pushes each result to this page as
-  soon as it is ready. The five run modes mirror the command-line demo this project came
-  from — same patterns, same metrics.
+  Pick what to download, how many items, and how hard to push concurrency. The server
+  fetches every item with asyncio and pushes it to this page as soon as it is ready.
+  The five run modes mirror the command-line demo this project grew out of — same
+  patterns, same metrics, just a browser instead of a terminal.
 </p>
 
 <section class="box">
-  <div class="box-head"><h2>Request</h2></div>
+  <div class="box-head"><h2><span class="no">01</span>request</h2></div>
   <form id="form" autocomplete="off">
     <div class="frow">
       <span class="flabel">Type</span>
@@ -75,7 +75,7 @@
 <p class="statusline" id="statusline">&gt; idle — configure a batch and press Start</p>
 
 <section class="box">
-  <div class="box-head"><h2>Results</h2><span class="box-note" id="run-note"></span></div>
+  <div class="box-head"><h2><span class="no">02</span>results</h2><span class="box-note" id="run-note"></span></div>
   <div class="rows" id="rows">
     <div class="empty">Nothing here yet. In stream mode rows appear as soon as the server
     starts and fill in one by one; in gather and compare modes everything lands at once.</div>
@@ -83,18 +83,18 @@
 </section>
 
 <section class="box">
-  <div class="box-head"><h2>Console</h2><button type="button" id="clear" class="linkbtn">clear</button></div>
+  <div class="box-head"><h2><span class="no">03</span>console</h2><button type="button" id="clear" class="linkbtn">clear</button></div>
   <div class="console" id="console" aria-live="polite"></div>
 </section>
 
 <section class="box" id="metrics-box" hidden>
-  <div class="box-head"><h2>Metrics</h2><span class="box-note" id="metrics-note"></span></div>
+  <div class="box-head"><h2><span class="no">04</span>metrics</h2><span class="box-note" id="metrics-note"></span></div>
   <table class="tbl"><tbody id="metrics-body"></tbody></table>
   <div class="hbar" id="metrics-bars"></div>
 </section>
 
 <section class="box" id="compare-box" hidden>
-  <div class="box-head"><h2>Sequential vs concurrent</h2><span class="box-note">same files, downloaded twice</span></div>
+  <div class="box-head"><h2><span class="no">05</span>sequential vs concurrent</h2><span class="box-note">same files, downloaded twice</span></div>
   <table class="tbl">
     <thead><tr><th></th><th class="num">sequential</th><th class="num">concurrent</th></tr></thead>
     <tbody id="compare-body"></tbody>
@@ -126,8 +126,9 @@
 <footer>
   <p>Sources: Giphy CDN, test-videos.co.uk (CC), MDN sample (CC0). In sim mode fixtures are generated
   locally with Pillow/ffmpeg. Downloaded bytes are held in memory for 20 minutes and served from
-  <code>/media/&lt;req_id&gt;/&lt;item_id&gt;</code> with Range support, so videos can be scrubbed in place.</p>
-  <p class="changelog">v0.3 — UI rework, per-item progress · v0.2 — SSE progress events, retries, range requests · v0.1 — first version</p>
+  <code>/media/&lt;req_id&gt;/&lt;item_id&gt;</code> with Range + ETag support, so videos can be scrubbed
+  in place without re-fetching bytes the browser already has.</p>
+  <p class="changelog">v0.3.1 — etag/if-range on /media, ui pass · v0.3 — plain light ui, per-item progress · v0.2 — sse progress, retries, range · v0.1 — first cut</p>
 </footer>
 
 </div>

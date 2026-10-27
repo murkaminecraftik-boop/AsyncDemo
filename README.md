@@ -33,7 +33,22 @@ Environment variables:
 | `PORT` | `5000` | server port |
 | `FORCE_SIM` | — | `FORCE_SIM=1` forces demo mode (no outbound requests) |
 
-## What's new in v0.3
+## What's new in v0.3.1
+
+- **Cheaper video playback.** Browsers buffer a large `<video>` as a burst
+  of `Range` requests (a 30 MB file easily produces a dozen `206`s). `/media/…`
+  now issues a strong `ETag` and honors `If-None-Match` (→ `304`) and
+  `If-Range` (matching → `206` slice, stale → full `200`), so the browser
+  never re-transfers bytes it already has.
+- **One media element per row, ever.** The client now marks a row complete
+  exactly once (`data-done`), so a repeated SSE event can no longer re-append
+  a `<video>` and make the browser restart the download.
+- **UI pass.** Same plain layout, warmer and more specific: paper background
+  with a faint dot grid, rust accent, mono section numbers (`01 request`),
+  dotted table rules, a blinking block caret after the title, diagonal
+  stripes crawling through in-flight progress bars, amber-on-dark console.
+
+## What was new in v0.3
 
 - **UI rework** — dropped the dark neon theme for a plain light developer
   look: system fonts, one accent colour, native radios/selects, results as

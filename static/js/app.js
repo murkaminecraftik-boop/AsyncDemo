@@ -173,7 +173,8 @@ function rowOf(itemId) { return document.getElementById("row-" + itemId); }
 
 function setProgress(itemId, downloaded, total) {
   const row = rowOf(itemId);
-  if (!row) return;
+  if (!row || row.dataset.done) return;
+  row.classList.add("running");
   state.bytes.set(itemId, downloaded);
   const pct = total > 0 ? Math.min(100, (downloaded / total) * 100) : 0;
   row.querySelector(".fill").style.width = pct.toFixed(1) + "%";
@@ -183,11 +184,13 @@ function setProgress(itemId, downloaded, total) {
 }
 
 function completeRow(r) {
-  state.done += 1;
-  state.bytes.set(r.item_id, r.size_bytes);
   const row = rowOf(r.item_id);
-  if (!row) return;
+  if (!row || row.dataset.done) return;  // one <video>/<img> per row, ever —
+  row.dataset.done = "1";                // re-appending resets src and the
+  state.done += 1;                       // browser re-downloads the media
+  state.bytes.set(r.item_id, r.size_bytes);
   const stat = row.querySelector(".stat");
+  row.classList.remove("running");
   row.querySelector(".fill").style.width = "100%";
   if (r.ok) {
     row.classList.add("done");
@@ -220,18 +223,22 @@ function completeRow(r) {
 }
 
 function cancelRow(d) {
-  state.done += 1;
   const row = rowOf(d.item_id);
-  if (!row) return;
+  if (!row || row.dataset.done) return;
+  row.dataset.done = "1";
+  state.done += 1;
+  row.classList.remove("running");
   row.classList.add("cancelled");
   row.querySelector(".fill").style.width = "100%";
   row.querySelector(".stat").textContent = "cancelled (timeout)";
 }
 
 function failRow(d) {
-  state.done += 1;
   const row = rowOf(d.item_id);
-  if (!row) return;
+  if (!row || row.dataset.done) return;
+  row.dataset.done = "1";
+  state.done += 1;
+  row.classList.remove("running");
   row.classList.add("fail");
   row.querySelector(".fill").style.width = "100%";
   row.querySelector(".stat").textContent = `failed — ${d.message || "error"}`;

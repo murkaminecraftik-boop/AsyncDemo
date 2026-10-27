@@ -378,7 +378,25 @@ def media_file(req_id: str, item_id: str):
     size = len(payload)
     ctype = entry["content_type"] or "application/octet-stream"
 
+    # Strong ETag: (req_id, item_id) is unique per run and its bytes never
+    # change under the same key, so size is a stable validator. Browsers
+    # playing a big <video> issue a burst of Range requests; with an ETag
+    # they revalidate with If-Range/If-None-Match instead of re-fetching.
+    etag = f'"{req_id}-{item_id}-{size}"'
+
+    if_none_match = request.headers.get("If-None-Match", "")
+    if if_none_match and etag in [t.strip() for t in if_none_match.split(",")]:
+        resp = Response(status=304)
+        resp.headers["ETag"] = etag
+        resp.headers["Cache-Control"] = "private, max-age=600"
+        return resp
+
     range_header = request.headers.get("Range", "")
+    if_range = request.headers.get("If-Range", "")
+    # If-Range mismatch means the client's copy is stale: serve the whole
+    # body (per RFC 7233) instead of a slice of a file it no longer has.
+    if if_range and if_range.strip() != etag:
+        range_header = ""
     rng = _parse_range(range_header, size) if range_header else None
     if rng:
         start, end = rng
@@ -390,6 +408,7 @@ def media_file(req_id: str, item_id: str):
         resp = Response(payload, content_type=ctype)
         resp.headers["Content-Length"] = str(size)
     resp.headers["Accept-Ranges"] = "bytes"
+    resp.headers["ETag"] = etag
     if request.args.get("download"):
         resp.headers["Content-Disposition"] = f'attachment; filename="{entry["filename"]}"'
     resp.headers["Cache-Control"] = "private, max-age=600"
