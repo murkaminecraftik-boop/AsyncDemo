@@ -1,122 +1,117 @@
 <!doctype html>
-<html lang="ru">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Async Media — Flask + asyncio</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9A%A1%3C/text%3E%3C/svg%3E">
+<title>Async Media</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Barlow:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
 
-<header class="top">
-  <div class="brand">
-    <span class="logo">⚡</span>
-    <div>
-      <h1>Async Media Fetcher</h1>
-      <p class="sub">Flask + asyncio · попроси гифки или тяжёлые видео — получи их потоком</p>
-    </div>
+<header class="topbar">
+  <div class="topbar-inner">
+    <h1>Async Media</h1>
   </div>
-  <span id="mode-badge" class="badge {{ 'sim' if mode == 'sim' else 'real' }}">
-    {{ 'демо-режим · данные генерируются локально' if mode == 'sim' else 'реальные загрузки из сети' }}
-  </span>
 </header>
 
-<section class="controls panel">
-  <div class="group">
-    <label>Что качать</label>
-    <div class="pills" role="radiogroup" aria-label="Тип медиа">
-      <label class="pill"><input type="radio" name="kind" value="gif" checked><span>Гифки</span></label>
-      <label class="pill"><input type="radio" name="kind" value="video"><span>Видео</span></label>
-      <label class="pill"><input type="radio" name="kind" value="mix"><span>Микс</span></label>
+<div class="stage">
+  <section class="deck" aria-label="Controls">
+    <div class="row">
+      <div class="cell">
+        <span class="label">Type</span>
+        <div class="seg" role="radiogroup" aria-label="Media type">
+          <label class="seg-item"><input type="radio" name="kind" value="gif" checked><span>GIF</span></label>
+          <label class="seg-item"><input type="radio" name="kind" value="video"><span>Video</span></label>
+          <label class="seg-item"><input type="radio" name="kind" value="mix"><span>Mix</span></label>
+        </div>
+      </div>
+
+      <div class="cell">
+        <label class="label" for="count">Count <output id="count-val">4</output></label>
+        <input type="range" id="count" min="2" max="8" value="4" step="1">
+      </div>
+
+      <div class="cell">
+        <label class="label" for="concurrency">Concurrency <output id="concurrency-val">4</output></label>
+        <input type="range" id="concurrency" min="1" max="8" value="4" step="1">
+      </div>
     </div>
-  </div>
 
-  <div class="group">
-    <label for="count">Сколько: <output id="count-val">4</output></label>
-    <input type="range" id="count" min="2" max="8" value="4" step="1">
-  </div>
+    <div class="row">
+      <div class="cell cell-grow">
+        <span class="label">Mode</span>
+        <div class="tabs" role="radiogroup" aria-label="Mode">
+          <label class="tab"><input type="radio" name="mode" value="stream" checked><span>Stream</span></label>
+          <label class="tab"><input type="radio" name="mode" value="gather"><span>Gather</span></label>
+          <label class="tab"><input type="radio" name="mode" value="timeout"><span>Timeout</span></label>
+          <label class="tab"><input type="radio" name="mode" value="sync"><span>Sync</span></label>
+          <label class="tab"><input type="radio" name="mode" value="compare"><span>Compare</span></label>
+        </div>
+      </div>
 
-  <div class="group">
-    <label for="concurrency">Параллельно: <output id="concurrency-val">4</output></label>
-    <input type="range" id="concurrency" min="1" max="8" value="4" step="1">
-  </div>
+      <div class="cell" id="timeout-row" hidden>
+        <label class="label" for="timeout">Timeout <output id="timeout-val">5</output> s</label>
+        <input type="range" id="timeout" min="1" max="15" value="5" step="0.5">
+      </div>
 
-  <div class="group wide">
-    <label>Режим</label>
-    <div class="pills" role="radiogroup" aria-label="Режим">
-      <label class="pill"><input type="radio" name="mode" value="stream" checked><span>Поток (as_completed)</span></label>
-      <label class="pill"><input type="radio" name="mode" value="gather"><span>gather</span></label>
-      <label class="pill"><input type="radio" name="mode" value="timeout"><span>Таймаут</span></label>
-      <label class="pill"><input type="radio" name="mode" value="sync"><span>Sync (блокирующий)</span></label>
-      <label class="pill"><input type="radio" name="mode" value="compare"><span>Sync vs Async</span></label>
-    </div>
-  </div>
-
-  <div class="group" id="timeout-row" hidden>
-    <label for="timeout">Таймаут: <output id="timeout-val">5</output> с</label>
-    <input type="range" id="timeout" min="1" max="15" value="5" step="0.5">
-  </div>
-
-  <div class="group actions">
-    <button id="run" class="btn primary">Загрузить</button>
-    <button id="stop" class="btn ghost" disabled>Стоп</button>
-  </div>
-</section>
-
-<div id="timeout-banner" class="banner" hidden></div>
-
-<main class="grid">
-  <section class="panel console-panel">
-    <h2>Консоль</h2>
-    <div id="console" class="console" aria-live="polite"></div>
-  </section>
-
-  <section class="panel">
-    <h2>Медиа</h2>
-    <div id="cards" class="cards">
-      <p class="hint">Выберите тип, количество и режим — затем нажмите «Загрузить».
-      В режиме «Поток» карточки будут появляться по мере готовности каждой задачи,
-      как в CLI-демо с <code>asyncio.as_completed</code>.</p>
+      <div class="cell cell-actions">
+        <button id="run" type="button" class="btn btn-go">Run</button>
+        <button id="stop" type="button" class="btn btn-halt" disabled>Stop</button>
+      </div>
     </div>
   </section>
-</main>
 
-<section class="panel" id="metrics-wrap" hidden>
-  <h2>Метрики</h2>
-  <table class="metrics"><tbody id="metrics-body"></tbody></table>
-</section>
+  <div id="timeout-banner" class="cue" hidden></div>
 
-<section class="panel" id="compare-wrap" hidden>
-  <h2>Sync vs Async</h2>
-  <p class="hint">Один и тот же набор файлов качается дважды: сначала блокирующе по очереди,
-  затем параллельно через <code>asyncio.gather</code>. Разница во времени — эффект асинхронности.</p>
-  <table class="metrics">
-    <thead><tr><th>Метрика</th><th>Sync</th><th>Async</th><th>Δ</th></tr></thead>
-    <tbody id="compare-body"></tbody>
-  </table>
-</section>
+  <div class="split">
+    <section class="panel" aria-labelledby="console-h">
+      <h2 id="console-h">Console</h2>
+      <div id="console" class="console" aria-live="polite"></div>
+    </section>
 
-<details class="panel howto">
-  <summary>Как это работает — соответствие вашему CLI-коду</summary>
-  <table class="metrics">
-    <thead><tr><th>CLI-демо</th><th>Здесь</th></tr></thead>
-    <tbody>
-      <tr><td><code>run_sync_demo</code> / <code>time.sleep</code></td><td>Режим «Sync» → <code>/api/stream?mode=sync</code></td></tr>
-      <tr><td><code>run_async_gather_demo</code> / <code>asyncio.gather</code></td><td>Режим «gather» → <code>/api/fetch</code></td></tr>
-      <tr><td><code>run_async_streaming_demo</code> / <code>asyncio.as_completed</code></td><td>Режим «Поток» → <code>/api/stream?mode=stream</code> (SSE)</td></tr>
-      <tr><td><code>run_timeout_demo</code> / <code>asyncio.wait</code> + cancel</td><td>Режим «Таймаут» → <code>/api/stream?mode=timeout</code></td></tr>
-      <tr><td><code>print_comparison</code></td><td>Режим «Sync vs Async» → <code>/api/compare</code></td></tr>
-      <tr><td><code>print_metrics</code> / <code>DemoResult</code></td><td>Панель «Метрики» (тот же набор полей)</td></tr>
-    </tbody>
-  </table>
-</details>
+    <section class="panel" aria-labelledby="media-h">
+      <h2 id="media-h">Results</h2>
+      <div id="cards" class="cards">
+        <p class="hint">Pick options, then Run.</p>
+      </div>
+    </section>
+  </div>
 
-<footer>
-  Источники: Giphy CDN, test-videos.co.uk (CC), MDN sample (CC0).
-  В демо-режиме файлы генерируются локально (Pillow / ffmpeg).
-  Браузер получает байты через <code>/media/&lt;req_id&gt;/&lt;item_id&gt;</code>.
-</footer>
+  <section class="panel" id="metrics-wrap" hidden aria-labelledby="metrics-h">
+    <h2 id="metrics-h">Metrics</h2>
+    <table class="metrics"><tbody id="metrics-body"></tbody></table>
+  </section>
+
+  <section class="panel" id="compare-wrap" hidden aria-labelledby="compare-h">
+    <h2 id="compare-h">Sync vs Async</h2>
+    <table class="metrics">
+      <thead><tr><th>Metric</th><th>Sync</th><th>Async</th><th>Δ</th></tr></thead>
+      <tbody id="compare-body"></tbody>
+    </table>
+  </section>
+
+  <details class="panel howto">
+    <summary>API map</summary>
+    <table class="metrics">
+      <thead><tr><th>Mode</th><th>Endpoint</th></tr></thead>
+      <tbody>
+        <tr><td>Sync</td><td><code>/api/stream?mode=sync</code></td></tr>
+        <tr><td>Gather</td><td><code>/api/fetch</code></td></tr>
+        <tr><td>Stream</td><td><code>/api/stream?mode=stream</code></td></tr>
+        <tr><td>Timeout</td><td><code>/api/stream?mode=timeout</code></td></tr>
+        <tr><td>Compare</td><td><code>/api/compare</code></td></tr>
+      </tbody>
+    </table>
+  </details>
+
+  <footer class="foot">
+    Media: Giphy, test-videos.co.uk, MDN.
+    Files: <code>/media/&lt;req_id&gt;/&lt;item_id&gt;</code>
+  </footer>
+</div>
 
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>
